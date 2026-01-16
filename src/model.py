@@ -3,6 +3,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class PointNetRefine(nn.Module):
+    """
+    PointNet-based Refinement Network for Coarse-to-Fine Line Refinement
+    
+    ========== Input/Output 定义 ==========
+    
+    Input:
+        - x: [B, D, N] 点云特征
+          - B: batch size
+          - D: 特征维度 (通常 D=3 表示 xyz，或 D=4 表示 xyz+intensity)
+          - N: 点的数量 (固定采样到 num_points，如 512)
+        - 注意：当前实现中，coarse 线（VMA 预测）只用于预处理阶段的坐标变换，
+          并不直接作为网络的输入特征。点云已经通过 canonicalization 转换到局部坐标系。
+    
+    Output:
+        - offset: [B, 1] 标量偏移量（单位：米）
+          - 物理含义：沿法线方向（垂直于 coarse 线）需要移动的距离
+          - 正负号约定：例如 "预测线在 GT 左侧，offset 为正"（具体取决于数据构造时的约定）
+    
+    ========== 网络结构 ==========
+    - Backbone: PointNet (Point-wise MLP + Max Pooling)
+    - Head: Regression Head (MLP) -> 输出 1D offset
+    """
     def __init__(self, input_dim=3, output_dim=1):
         """
         Args:

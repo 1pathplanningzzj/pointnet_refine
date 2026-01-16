@@ -2,8 +2,7 @@ import torch
 import numpy as np
 from src.model import PointNetRefine
 
-# 假设这几个函数已经在 utils 或 dataset 中定义
-# 这里为了独立演示，简单复刻一下核心逻辑
+
 def get_canonical_transform(line_segment):
     """
     计算从 Global 到 Local (以线段为中心) 的变换矩阵与平移量
