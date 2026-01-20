@@ -2,86 +2,87 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class PointNetRefine(nn.Module):
-    """
-    PointNet-based Refinement Network for Coarse-to-Fine Line Refinement
-    
-    ========== Input/Output 定义 ==========
-    
-    Input:
-        - x: [B, D, N] 点云特征
-          - B: batch size
-          - D: 特征维度 (通常 D=3 表示 xyz，或 D=4 表示 xyz+intensity)
-          - N: 点的数量 (固定采样到 num_points，如 512)
-        - 注意：当前实现中，coarse 线（VMA 预测）只用于预处理阶段的坐标变换，
-          并不直接作为网络的输入特征。点云已经通过 canonicalization 转换到局部坐标系。
-    
-    Output:
-        - offset: [B, 1] 标量偏移量（单位：米）
-          - 物理含义：沿法线方向（垂直于 coarse 线）需要移动的距离
-          - 正负号约定：例如 "预测线在 GT 左侧，offset 为正"（具体取决于数据构造时的约定）
-    
-    ========== 网络结构 ==========
-    - Backbone: PointNet (Point-wise MLP + Max Pooling)
-    - Head: Regression Head (MLP) -> 输出 1D offset
-    """
-    def __init__(self, input_dim=3, output_dim=1):
-        """
-        Args:
-            input_dim: 输入点特征维度 (x,y,z) 为 3，如有 intensity 则为 4
-            output_dim: 回归偏移量维度. 
-                        通常为 1 (只回归法向距离 lateral offset)，
-                        或者 2 (回归 dx, dy)
-        """
-        super(PointNetRefine, self).__init__()
-        
-        # 1. Point-wise Feature Extraction (Shared MLP)
-        # 输入: [Batch, Input_Dim, Num_Points]
-        self.conv1 = nn.Conv1d(input_dim, 64, 1)
-        self.bn1 = nn.BatchNorm1d(64)
+class PointNetEncoder(nn.Module):
+    def __init__(self, in_channel=4, out_dim=512):
+        super(PointNetEncoder, self).__init__()
+        self.conv1 = nn.Conv1d(in_channel, 64, 1)
         self.conv2 = nn.Conv1d(64, 128, 1)
+        self.conv3 = nn.Conv1d(128, out_dim, 1)
+        self.bn1 = nn.BatchNorm1d(64)
         self.bn2 = nn.BatchNorm1d(128)
-        self.conv3 = nn.Conv1d(128, 1024, 1)
-        self.bn3 = nn.BatchNorm1d(1024)
-
-        # 2. Regression Head (MLP)
-        # 输入: [Batch, 1024] (Global Feature)
-        self.fc1 = nn.Linear(1024, 512)
-        self.bn4 = nn.BatchNorm1d(512)
-        self.fc2 = nn.Linear(512, 128)
-        self.bn5 = nn.BatchNorm1d(128)
-        self.fc3 = nn.Linear(128, output_dim) 
+        self.bn3 = nn.BatchNorm1d(out_dim)
 
     def forward(self, x):
-        """
-        x: [B, D, N]  (Batch, Dim, Num_Points)
-        """
-        B, D, N = x.size()
-
-        # --- Feature Extraction ---
+        # x: (B, C, N)
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x))) 
-        # x shape: [B, 1024, N]
+        x = self.bn3(self.conv3(x)) # (B, Out, N)
+        x = torch.max(x, 2, keepdim=False)[0] # Global Max Pooling -> (B, Out)
+        return x
 
-        # --- Max Pooling (Symmetric Function) ---
-        # 提取全局几何特征
-        x = torch.max(x, 2, keepdim=False)[0] 
-        # x shape: [B, 1024]
+class LineRefineNet(nn.Module):
+    def __init__(self, num_line_points=32, feature_dim=512):
+        super(LineRefineNet, self).__init__()
+        
+        # 1. Context Encoder
+        self.context_encoder = PointNetEncoder(in_channel=4, out_dim=feature_dim)
+        
+        # 2. Line Point Encoder (encode geometry of each line point relative to center)
+        # Input: 3 (xyz)
+        self.point_mlp = nn.Sequential(
+            nn.Conv1d(3, 64, 1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, 1),
+            nn.BatchNorm1d(128),
+            nn.ReLU()
+        )
+        
+        # 3. Fusion & Regressor
+        # Concatenate: [GlobalContext(512), PointFeat(128)] -> 640
+        self.regressor = nn.Sequential(
+            nn.Conv1d(feature_dim + 128, 256, 1),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Conv1d(256, 128, 1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Conv1d(128, 3, 1) # Predict dx, dy, dz
+        )
 
-        # --- Regression Head ---
-        x = F.relu(self.bn4(self.fc1(x)))
-        x = F.relu(self.bn5(self.fc2(x)))
+    def forward(self, context, noisy_line):
+        """
+        context: (B, N, 4) - Point Cloud
+        noisy_line: (B, M, 3) - Noisy Polyline
+        """
+        B = context.shape[0]
         
-        # 最后一层通常不加激活函数，因为offset可正可负
-        offset = self.fc3(x) 
+        # Transpose for Conv1d: (B, C, N)
+        ctx = context.transpose(2, 1) 
+        line = noisy_line.transpose(2, 1)
         
-        return offset
+        # 1. Encode Context -> Global Feature
+        global_feat = self.context_encoder(ctx) # (B, 512)
+        
+        # 2. Encode Line Points
+        point_feat = self.point_mlp(line) # (B, 128, M)
+        
+        # 3. Fuse
+        # Expand global feature to match number of line points
+        global_feat_expanded = global_feat.unsqueeze(2).repeat(1, 1, point_feat.shape[2]) # (B, 512, M)
+        
+        fusion = torch.cat([global_feat_expanded, point_feat], dim=1) # (B, 640, M)
+        
+        # 4. Regress Offsets
+        offsets = self.regressor(fusion) # (B, 3, M)
+        
+        # Transpose back: (B, M, 3)
+        return offsets.transpose(2, 1)
 
 if __name__ == '__main__':
-    # Test shape
-    sim_data = torch.rand(32, 3, 512) # batch=32, xyz=3, points=512
-    model = PointNetRefine(input_dim=3, output_dim=1)
-    output = model(sim_data)
-    print("Input shape:", sim_data.shape)
-    print("Output offset shape:", output.shape) # Should be [32, 1]
+    # Test
+    fake_ctx = torch.randn(2, 1024, 4)
+    fake_line = torch.randn(2, 32, 3)
+    model = LineRefineNet()
+    out = model(fake_ctx, fake_line)
+    print("Output shape:", out.shape) # Expect (2, 32, 3)

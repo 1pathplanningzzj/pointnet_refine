@@ -1,117 +1,150 @@
 import torch
+from torch.utils.data import DataLoader
 import numpy as np
-from src.model import PointNetRefine
+import plotly.graph_objects as go
+import os
+import sys
 
+# Ensure src is importable
+sys.path.append(os.getcwd())
 
-def get_canonical_transform(line_segment):
-    """
-    计算从 Global 到 Local (以线段为中心) 的变换矩阵与平移量
-    """
-    p_start = line_segment[0]
-    p_end = line_segment[1]
-    mid_point = (p_start + p_end) / 2.0
-    
-    tangent = p_end - p_start
-    tangent[2] = 0 
-    tangent = tangent / (np.linalg.norm(tangent) + 1e-6)
-    
-    z_axis = np.array([0, 0, 1.0])
-    normal = np.cross(z_axis, tangent) 
-    normal = normal / (np.linalg.norm(normal) + 1e-6)
-    
-    # R_global_to_local 的行向量分别是新的 x, y, z 轴
-    R_global_to_local = np.vstack([tangent, normal, z_axis]) 
-    
-    return mid_point, R_global_to_local, normal
+from src.dataset import LaneRefineDataset
+from src.model import LineRefineNet
 
-def inference_single_line(model, line_segment, context_points, device, num_points=512):
-    """
-    Args:
-        model: Trained PointNetRefine
-        line_segment: (2, 3) VMA预测的线段
-        context_points: (N, 3) 原始点云
-    Returns:
-        refined_segment: (2, 3)
-    """
-    # 1. Canonicalization
-    mid_point, R, normal_vec = get_canonical_transform(line_segment)
+# Config
+DATA_DIR = "./inference_data"
+MODEL_PATH = "checkpoints/best_model.pth"
+OUTPUT_HTML_DIR = "./inference_vis"
+NUM_VIS_SAMPLES = 10  # Visualize 10 samples
+
+os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
+
+def main():
+    # 1. Load Data
+    print(f"Loading inference dataset from {DATA_DIR}...")
+    dataset = LaneRefineDataset(DATA_DIR)
     
-    # Transform points to local
-    points_centered = context_points - mid_point
-    points_local = points_centered @ R.T # (N, 3)
+    if len(dataset) == 0:
+        print("Dataset is empty. Run generate_inference_data.py and augment_inference_data.py first.")
+        return
+
+    # Use batch_size=1 so we can process sample by sample simply
+    loader = DataLoader(dataset, batch_size=1, shuffle=True)
     
-    # 2. Sampling (Simple Random or Farthest Point)
-    curr_n = points_local.shape[0]
-    if curr_n == 0:
-        return line_segment # No points, skip
-        
-    if curr_n >= num_points:
-        choice = np.random.choice(curr_n, num_points, replace=False)
-        points_local = points_local[choice, :]
+    # 2. Load Model
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    model = LineRefineNet().to(device)
+    if os.path.exists(MODEL_PATH):
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+        print(f"Loaded model from {MODEL_PATH}")
     else:
-        choice = np.random.choice(curr_n, num_points, replace=True)
-        points_local = points_local[choice, :]
+        print(f"Model file {MODEL_PATH} not found!")
+        return
         
-    # 3. Model Prediction
-    points_tensor = torch.from_numpy(points_local).float().transpose(1, 0).unsqueeze(0) # (1, 3, N)
-    points_tensor = points_tensor.to(device)
+    model.eval()
+
+    print(f"Starting inference visualization for {NUM_VIS_SAMPLES} random samples...")
+    
+    vis_count = 0
     
     with torch.no_grad():
-        # model output scaled offset
-        pred_offset_scalar = model(points_tensor) # (1, 1)
-        pred_offset = pred_offset_scalar.item()
-        
-    # 4. Apply Offset back to Global
-    # Offset 是沿着 Normal 方向的距离
-    # 我们之前的定义: Label 是 "GT相对于Line的距离"。
-    # 所以如果 Label 是 +0.2，表示 GT 在 Line 左边 0.2m。
-    # 我们要把 Line 往左移 0.2m 才能贴合 GT。
-    # 所以 Refined = Original + Normal * Offset
-    
-    offset_vec = normal_vec * pred_offset
-    
-    refined_start = line_segment[0] + offset_vec
-    refined_end = line_segment[1] + offset_vec
-    
-    return np.array([refined_start, refined_end])
+        for i, batch in enumerate(loader):
+            if vis_count >= NUM_VIS_SAMPLES:
+                break
+                
+            # Inputs
+            pcd = batch['context'].to(device)       # (B, N, 4)
+            noisy_line = batch['noisy_line'].to(device) # (B, M, 3)
+            gt_offsets = batch['target_offset'].to(device) # (B, M, 3)
+            
+            # Forward Pass
+            pred_offsets = model(pcd, noisy_line) # (B, M, 3)
+            
+            # Move to CPU for plotting
+            pcd_np = pcd[0].cpu().numpy()          # (N, 4)
+            noisy_np = noisy_line[0].cpu().numpy() # (M, 3)
+            gt_off_np = gt_offsets[0].cpu().numpy()# (M, 3)
+            pred_off_np = pred_offsets[0].cpu().numpy()# (M, 3)
+            
+            # Reconstruct Absolute Lines
+            gt_line_np = noisy_np + gt_off_np
+            pred_line_np = noisy_np + pred_off_np
+            
+            # --- Visualization using Plotly ---
+            fig = go.Figure()
+            
+            # 1. Plot Context Point Cloud
+            # Subsample if too dense for web viz
+            if pcd_np.shape[0] > 5000:
+                indices = np.random.choice(pcd_np.shape[0], 5000, replace=False)
+                plot_pcd = pcd_np[indices]
+            else:
+                plot_pcd = pcd_np
+                
+            fig.add_trace(go.Scatter3d(
+                x=plot_pcd[:, 0], y=plot_pcd[:, 1], z=plot_pcd[:, 2],
+                mode='markers',
+                marker=dict(
+                    size=1.5,
+                    color=plot_pcd[:, 3], # Intensity
+                    colorscale='Viridis',
+                    cmin=0, cmax=30, # Intensity scaling matching previous script
+                    opacity=0.6
+                ),
+                name='Context PCD'
+            ))
+            
+            # 2. Plot Noisy Input (Red Dashed)
+            fig.add_trace(go.Scatter3d(
+                x=noisy_np[:,0], y=noisy_np[:,1], z=noisy_np[:,2],
+                mode='lines+markers',
+                marker=dict(size=3, color='red'),
+                line=dict(color='red', width=3, dash='dash'),
+                name='Noisy Input'
+            ))
+            
+            # 3. Plot Ground Truth (Green Solid)
+            fig.add_trace(go.Scatter3d(
+                x=gt_line_np[:,0], y=gt_line_np[:,1], z=gt_line_np[:,2],
+                mode='lines+markers',
+                marker=dict(size=3, color='green'),
+                line=dict(color='green', width=5),
+                name='Ground Truth'
+            ))
+            
+            # 4. Plot Refined Output (Blue Solid)
+            fig.add_trace(go.Scatter3d(
+                x=pred_line_np[:,0], y=pred_line_np[:,1], z=pred_line_np[:,2],
+                mode='lines+markers',
+                marker=dict(size=4, color='cyan'),
+                line=dict(color='cyan', width=4),
+                name='Refined Prediction'
+            ))
+            
+            # Calculate simple metric for title
+            l1_loss = np.mean(np.abs(pred_line_np - gt_line_np))
+            input_diff = np.mean(np.abs(noisy_np - gt_line_np))
+            
+            fig.update_layout(
+                scene=dict(
+                    aspectmode='data',
+                    xaxis_title='X (m)',
+                    yaxis_title='Y (m)',
+                    zaxis_title='Z (m)'
+                ),
+                title=f"Sample {vis_count} - Input Err: {input_diff:.3f}m -> Refined Err: {l1_loss:.3f}m",
+                margin=dict(r=0, l=0, b=0, t=40)
+            )
+            
+            save_path = os.path.join(OUTPUT_HTML_DIR, f"inference_result_{vis_count}.html")
+            fig.write_html(save_path)
+            print(f"Saved visualization to {save_path}")
+            
+            vis_count += 1
+            
+    print("Inference visualization complete.")
 
 if __name__ == "__main__":
-    # Load Model
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = PointNetRefine(input_dim=3, output_dim=1).to(DEVICE)
-    try:
-        model.load_state_dict(torch.load("pointnet_refine.pth"))
-        print("Model loaded.")
-    except:
-        print("Warning: Model weight not found, using random init.")
-    model.eval()
-    
-    # Mock VMA Output (A line segment)
-    vma_pred_line = np.array([[10.0, 10.0, 0.0], [20.0, 20.0, 0.0]])
-    
-    # Mock Truth (Offset by +0.3m along normal)
-    # Normal of (1,1,0) is (-0.7, 0.7, 0)
-    normal = np.array([-0.707, 0.707, 0])
-    gt_offset = 0.3
-    
-    # Mock Points around GT line
-    mock_points = []
-    for i in range(100):
-        t = np.random.rand()
-        pt_on_line = vma_pred_line[0] + (vma_pred_line[1] - vma_pred_line[0]) * t
-        pt_gt = pt_on_line + normal * gt_offset
-        noise = (np.random.rand(3) - 0.5) * 0.05
-        mock_points.append(pt_gt + noise)
-    mock_points = np.array(mock_points)
-    
-    print("Original Line Start:", vma_pred_line[0])
-    
-    # Run Inference
-    refined_line = inference_single_line(model, vma_pred_line, mock_points, DEVICE)
-    
-    print("Refined Line Start: ", refined_line[0])
-    print("Expected Shift Dir: ", normal)
-    
-    # Check if moved in correct direction
-    diff = refined_line[0] - vma_pred_line[0]
-    print("Actual Adjustment:  ", diff)
+    main()

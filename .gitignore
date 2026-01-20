@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+
+# Dataset and Large Files
+data/
+train_data/
+inference_data/
+*.bag
+*.pcd
+
+# Visualization outputs
+vis_data/
+inference_vis/
+work_dirs/
+
+# Checkpoints
+checkpoints/
+*.pth
+
+# IDE settings
+.vscode/
+.idea/
+
+# Backup / Old files
+backup/
+
+# MMDetection3d artifacts (if any local builds)
+mmdetection3d/build/
+mmdetection3d/work_dirs/
