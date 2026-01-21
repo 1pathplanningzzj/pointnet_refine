@@ -15,7 +15,7 @@ from src.model import LineRefineNet
 DATA_DIR = "./train_data"
 MODEL_PATH = "checkpoints/refine_model_epoch_50.pth"
 OUTPUT_HTML_DIR = "./inference_vis_epoch10"
-NUM_VIS_SAMPLES = 10  # Visualize 10 samples
+NUM_VIS_SAMPLES = 15  # Visualize 10 samples
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 
