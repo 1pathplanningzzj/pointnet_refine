@@ -8,15 +8,23 @@ import torch.nn.functional as F
 
 def main():
     # Settings
-    BATCH_SIZE = 16
-    EPOCHS = 50
+    BATCH_SIZE = 32
+    EPOCHS = 100
     LR = 0.001
     DATA_ROOT = "train_data"
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 1. Data
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=2.0)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=1.0)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True, 
+        num_workers=16, # Reduced to 8 for stability
+        pin_memory=True, 
+        persistent_workers=True,
+        prefetch_factor=4
+    )
     
     # 2. Model
     model = LineRefineNet().to(DEVICE)
@@ -27,10 +35,10 @@ def main():
     model.train()
     for epoch in range(EPOCHS):
         total_loss = 0
-        for batch in dataloader:
-            context = batch['context'].to(DEVICE)
-            noisy_line = batch['noisy_line'].to(DEVICE)
-            target_offset = batch['target_offset'].to(DEVICE)
+        for batch_idx, batch in enumerate(dataloader):
+            context = batch['context'].to(DEVICE, non_blocking=True)
+            noisy_line = batch['noisy_line'].to(DEVICE, non_blocking=True)
+            target_offset = batch['target_offset'].to(DEVICE, non_blocking=True)
             
             optimizer.zero_grad()
             
@@ -45,6 +53,9 @@ def main():
             
             total_loss += loss.item()
             
+            if batch_idx % 10 == 0:
+                 print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.6f}")
+
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch+1}/{EPOCHS}, Loss: {avg_loss:.6f}")
         

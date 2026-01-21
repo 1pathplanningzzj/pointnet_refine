@@ -12,9 +12,9 @@ from src.dataset import LaneRefineDataset
 from src.model import LineRefineNet
 
 # Config
-DATA_DIR = "./inference_data"
-MODEL_PATH = "checkpoints/best_model.pth"
-OUTPUT_HTML_DIR = "./inference_vis"
+DATA_DIR = "./train_data"
+MODEL_PATH = "checkpoints/refine_model_epoch_50.pth"
+OUTPUT_HTML_DIR = "./inference_vis_epoch10"
 NUM_VIS_SAMPLES = 10  # Visualize 10 samples
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)

@@ -4,50 +4,58 @@ import numpy as np
 import glob
 from scipy.spatial.transform import Rotation as R
 import struct
-import open3d as o3d # Not available, use custom saver
 
-# --- 1. Helper Config ---
-BAG_NAME = "TAD_front_lidar_2025-12-01-13-32-45_25_all.bag"
-DATA_ROOT = f"/homes/zhangzijian/pointnet_refine/data/test/{BAG_NAME}"
-PCD_PATH = os.path.join(DATA_ROOT, "annotation_raw_data/merged.pcd")
-POSE_DIR = os.path.join(DATA_ROOT, "annotation_raw_data/pose")
-GT_JSON_PATH = os.path.join(DATA_ROOT, f"{BAG_NAME}.json")
+# --- Configuration ---
+SOURCE_ROOT = "/homes/zhangzijian/pointnet_refine/data/new_train_data"
 OUTPUT_DIR = "/homes/zhangzijian/pointnet_refine/train_data"
 SEGMENT_LEN = 50.0  # meters
 STRIDE = 25.0       # meters
 
-# --- 2. Loaders ---
+# --- Loaders ---
 
 def load_poses(pose_dir):
-    print("Loading poses...")
+    print(f"Loading poses from {pose_dir}...")
     poses = []
     files = glob.glob(os.path.join(pose_dir, "*.json"))
     for f in files:
-        with open(f, 'r') as fp:
-            data = json.load(fp)
-            # Use 'ts' from json content, or filename? Usually filename is strictly timestamp
-            # But content has 'ts'. Let's use content 'ts' for consistency with filename if possible
-            ts = data['ts']
-            # Also store filename base for exact matching if needed, but ts is key
-            filename_ts = os.path.splitext(os.path.basename(f))[0]
-            
-            poses.append({
-                'ts': str(ts), # Keep as string to match image names often
-                'filename_ts': filename_ts,
-                'x': data['x'],
-                'y': data['y'],
-                'z': data['z'],
-                'q': [data['qx'], data['qy'], data['qz'], data['qw']] # scipy scalar definition
-            })
+        try:
+            with open(f, 'r') as fp:
+                data = json.load(fp)
+                
+                # Robust timestamp extraction
+                if 'ts' in data:
+                    ts = str(data['ts'])
+                else:
+                    # Fallback to filename
+                    ts = os.path.splitext(os.path.basename(f))[0]
+
+                # Use filename as unique ID for output files
+                filename_ts = os.path.splitext(os.path.basename(f))[0]
+                
+                poses.append({
+                    'ts': ts, 
+                    'filename_ts': filename_ts,
+                    'x': data['x'],
+                    'y': data['y'],
+                    'z': data['z'],
+                    'q': [data['qx'], data['qy'], data['qz'], data['qw']] 
+                })
+        except Exception as e:
+            print(f"Error loading pose {f}: {e}")
+            continue
     
-    # Sort by x (assuming mostly linear forward motion) or ts
-    # Sorting by x helps in distance-based sampling
-    poses.sort(key=lambda p: p['x'])
+    # Sort by timestamp (string) or x
+    # Sorting by filename_ts usually works for sequential timestamps
+    poses.sort(key=lambda p: p['filename_ts'])
     print(f"Loaded {len(poses)} poses.")
     return poses
 
 def load_pcd_fast(pcd_path):
     print(f"Loading {pcd_path}...")
+    if not os.path.exists(pcd_path):
+        print(f"PCD not found: {pcd_path}")
+        return np.zeros((0, 4), dtype=np.float32)
+
     with open(pcd_path, 'rb') as f:
         header = []
         while True:
@@ -56,28 +64,52 @@ def load_pcd_fast(pcd_path):
             if line.startswith(b'DATA'):
                 break
         
-        points = 0
-        for line in header:
-            if line.startswith(b'POINTS'):
-                points = int(line.split()[1])
-        
         # Load binary
-        dt = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('intensity', 'u2')])
-        buffer = f.read()
-        data = np.frombuffer(buffer, dtype=dt)
-        
-        # Convert to simple Nx4 array for easier manipulation
-        # [x, y, z, intensity]
-        # intensity cast to float for homogenous array
-        arr = np.column_stack((data['x'], data['y'], data['z'], data['intensity'].astype(np.float32)))
-        return arr
+        try:
+            buffer = f.read()
+            # Standard PCD often uses x y z intensity (4 floats or 3 floats + 1 int)
+            # We assume consistency with project history (4 floats or mix)
+            # If default read fails, we try fallback.
+            
+            # Legacy logic: 
+            dt = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('intensity', 'u2')])
+            
+            num_points_bytes = len(buffer)
+            if num_points_bytes % 14 == 0:
+                 data = np.frombuffer(buffer, dtype=dt)
+                 arr = np.column_stack((data['x'], data['y'], data['z'], data['intensity'].astype(np.float32)))
+            else:
+                 # Backup: maybe it's all floats (xyzi) -> 16 bytes
+                 dt_f = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('intensity', 'f4')])
+                 if num_points_bytes % 16 == 0:
+                    data = np.frombuffer(buffer, dtype=dt_f)
+                    arr = np.column_stack((data['x'], data['y'], data['z'], data['intensity']))
+                 else:
+                    # Last resort: just read as flat floats and reshape? Risky.
+                    # Return empty to avoid crash
+                    print(f"Warning: PCD buffer size {num_points_bytes} not divisible by 14 or 16.")
+                    return np.zeros((0, 4), dtype=np.float32)
+                 
+            return arr
+            
+        except Exception as e:
+            print(f"Error parsing binary PCD: {e}")
+            return np.zeros((0, 4), dtype=np.float32)
 
 def load_gt_items(json_path):
     print(f"Loading GT {json_path}...")
+    if not os.path.exists(json_path):
+        print(f"GT file not found: {json_path}")
+        return []
+
     with open(json_path, 'r') as f:
         data = json.load(f)
     items = []
-    for item in data.get('items', []):
+    
+    # Check if 'items' key exists or if root is list
+    item_list = data.get('items', []) if isinstance(data, dict) else data
+    
+    for item in item_list:
         category = item.get('category', 'unknown')
         raw_pts = []
         
@@ -97,29 +129,63 @@ def load_gt_items(json_path):
             })
     return items
 
-# --- 3. Processing ---
+# --- Processing Helpers ---
+
+def transform_to_local(global_pts, pose):
+    if len(global_pts) == 0: return global_pts
+    centered = global_pts[:, :3] - np.array([pose['x'], pose['y'], pose['z']])
+    rot = R.from_quat(pose['q'])
+    inv_rot = rot.inv()
+    local_xyz = inv_rot.apply(centered)
+    
+    if global_pts.shape[1] > 3:
+        return np.column_stack((local_xyz, global_pts[:, 3:]))
+    return local_xyz
+
+def clip_polyline_by_x(points, x_min, x_max):
+    if len(points) < 2:
+        if len(points) == 1:
+            if x_min <= points[0][0] <= x_max:
+                return points
+        return np.empty((0, 3))
+
+    new_points = []
+    for i in range(len(points) - 1):
+        p1 = points[i]
+        p2 = points[i+1]
+        
+        # Clip logic 
+        t0, t1 = 0.0, 1.0
+        dx = p2[0] - p1[0]
+        
+        if abs(dx) < 1e-6:
+            if p1[0] < x_min or p1[0] > x_max: continue 
+        else:
+            t_min = (x_min - p1[0]) / dx
+            t_max = (x_max - p1[0]) / dx
+            
+            if dx > 0:
+                t0 = max(t0, t_min)
+                t1 = min(t1, t_max)
+            else:
+                t0 = max(t0, t_max)
+                t1 = min(t1, t_min)
+        
+        if t0 <= t1:
+            pt0 = p1 + t0 * (p2 - p1)
+            pt1 = p1 + t1 * (p2 - p1)
+            
+            if len(new_points) == 0 or np.linalg.norm(new_points[-1] - pt0) > 1e-6:
+                new_points.append(pt0)
+            new_points.append(pt1)
+
+    return np.array(new_points)
 
 def save_pcd(path, points):
-    # points: Nx4 (x, y, z, intensity)
-    # Write ASCII or Binary PCD. Binary is faster/smaller.
-    
     num_points = len(points)
     with open(path, 'w') as f:
-        # Header
-        f.write("VERSION 0.7\n")
-        f.write("FIELDS x y z intensity\n")
-        f.write("SIZE 4 4 4 4\n") # Saving all as float32 for simplicity (intensity cast back to int? or keep float)
-        f.write("TYPE F F F F\n")
-        f.write("COUNT 1 1 1 1\n")
-        f.write(f"WIDTH {num_points}\n")
-        f.write("HEIGHT 1\n")
-        f.write("VIEWPOINT 0 0 0 1 0 0 0\n")
-        f.write(f"POINTS {num_points}\n")
-        f.write("DATA ascii\n")
-        
-        # Write data (slow in python loop, but safe for ascii)
-        # For speed in bulk generation, maybe binary is essential?
-        # Let's write ascii for now, if too slow, switch to binary structure pack
+        f.write("VERSION 0.7\nFIELDS x y z intensity\nSIZE 4 4 4 4\nTYPE F F F F\nCOUNT 1 1 1 1\n")
+        f.write(f"WIDTH {num_points}\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\nPOINTS {num_points}\nDATA ascii\n")
         for p in points:
             f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {int(p[3])}\n")
 
@@ -142,194 +208,108 @@ def save_json(path, items, ref_ts):
     with open(path, 'w') as f:
         json.dump(output, f, indent=4)
 
-def transform_to_local(global_pts, pose):
-    """
-    global_pts: Nx3 or Nx4
-    pose: dict with x,y,z,q
-    """
-    # 1. Translate
-    centered = global_pts[:, :3] - np.array([pose['x'], pose['y'], pose['z']])
+def process_dataset(annotation_dir, gt_json_path, output_dir):
+    print(f"\nProcessing Dataset:\n  Raw: {annotation_dir}\n  GT: {gt_json_path}")
     
-    # 2. Rotate
-    # Global to Local = Inverse of Body to Global
-    # Pose orientation usually means Body -> Global
-    # So we need inverse rotation
-    rot = R.from_quat(pose['q'])
-    inv_rot = rot.inv()
-    local_xyz = inv_rot.apply(centered)
+    pose_dir = os.path.join(annotation_dir, "pose")
+    pcd_path = os.path.join(annotation_dir, "merged.pcd")
     
-    if global_pts.shape[1] > 3:
-        return np.column_stack((local_xyz, global_pts[:, 3:]))
-    return local_xyz
+    poses = load_poses(pose_dir)
+    if not poses:
+        print("  No poses found. Skipping.")
+        return
 
-def clip_polyline_by_x(points, x_min, x_max):
-    """
-    Clip a checklist of points (polyline) to a valid X range.
-    Interpolates new vertices at the boundaries.
-    Assumes Z and Y are linearly interpolated.
-    points: (N, 3) numpy array
-    """
-    if len(points) < 2:
-        # Check if single point is in range
-        if len(points) == 1:
-            if x_min <= points[0][0] <= x_max:
-                return points
-        return np.empty((0, 3))
+    all_points = load_pcd_fast(pcd_path)
+    if len(all_points) == 0:
+        print("  No points found. Skipping.")
+        return
 
-    new_points = []
+    gt_items = load_gt_items(gt_json_path)
     
-    for i in range(len(points) - 1):
-        p1 = points[i]
-        p2 = points[i+1]
-        
-        # Segment parameterization P(t) = P1 + t*(P2-P1), t in [0, 1]
-        dx = p2[0] - p1[0]
-        
-        t_enter = 0.0
-        t_exit = 1.0
-        
-        # Clip against x_min
-        # p1[0] + t * dx >= x_min
-        if abs(dx) < 1e-6:
-            # Vertical line (const x)
-            if p1[0] < x_min: t_enter = 2.0 # Invalid
-        else:
-            t = (x_min - p1[0]) / dx
-            if dx > 0:
-                # entering from left
-                t_enter = max(t_enter, t)
-            else:
-                # entering from right?? No, dx < 0 means moving left.
-                # condition x >= x_min.
-                # start at large x, go to small x.
-                # must be less than t for intersection
-                t_exit = min(t_exit, t)
-                
-        # Clip against x_max
-        # p1[0] + t * dx <= x_max
-        if abs(dx) < 1e-6:
-            if p1[0] > x_max: t_enter = 2.0
-        else:
-            t = (x_max - p1[0]) / dx
-            if dx > 0:
-                # moving right. must be <= x_max
-                t_exit = min(t_exit, t)
-            else:
-                # moving left. must be <= x_max (always true if starting < max?)
-                # condition x <= x_max.
-                # if start > max, we need to enter.
-                t_enter = max(t_enter, t)
-                
-        if t_enter <= t_exit:
-            # Valid segment exists
-            # Calculate points
-            # Caution: floating point errors
-            t_enter = max(0.0, t_enter)
-            t_exit = min(1.0, t_exit)
+    # Path range
+    x_min = min(p['x'] for p in poses)
+    x_max = max(p['x'] for p in poses)
+    total_len = x_max - x_min
+    print(f"  Path X range: {x_min:.1f} to {x_max:.1f} ({total_len:.1f}m)")
+    
+    current_x = x_min + SEGMENT_LEN / 2
+    count = 0
+    
+    while current_x < x_max:
+        # Find closest pose
+        closest_pose = min(poses, key=lambda p: abs(p['x'] - current_x))
+        if abs(closest_pose['x'] - current_x) > 10.0:
+            current_x += STRIDE
+            continue
             
-            p_start = p1 + t_enter * (p2 - p1)
-            p_end = p1 + t_exit * (p2 - p1)
+        ts_name = closest_pose['filename_ts']
+        
+        # optimize: filter points by radius 60m
+        dx = all_points[:, 0] - closest_pose['x']
+        dy = all_points[:, 1] - closest_pose['y']
+        
+        # Careful with large arrays, pre-filter reduces memory
+        subset_mask = (dx**2 + dy**2) < 3600
+        subset_points = all_points[subset_mask]
+        
+        if len(subset_points) > 0:
+             # Transform
+            local_points = transform_to_local(subset_points, closest_pose)
             
-            # Add p_start if it is the first point or disconnected from previous
-            if len(new_points) == 0 or np.linalg.norm(new_points[-1] - p_start) > 1e-6:
-                new_points.append(p_start)
+            # Crop X
+            mask = (local_points[:, 0] >= -SEGMENT_LEN/2) & (local_points[:, 0] <= SEGMENT_LEN/2)
+            final_points = local_points[mask]
             
-            # Add p_end
-            new_points.append(p_end)
-
-    return np.array(new_points)
+            # Process GT
+            final_gt_items = []
+            for item in gt_items:
+                local_line = transform_to_local(item['points'], closest_pose)
+                clipped = clip_polyline_by_x(local_line, -SEGMENT_LEN/2, SEGMENT_LEN/2)
+                if len(clipped) > 1:
+                    final_gt_items.append({
+                        'category': item['category'],
+                        'points': clipped,
+                        'attributes': item['attributes']
+                    })
+            
+            # Save
+            save_pcd(os.path.join(output_dir, f"{ts_name}.pcd"), final_points)
+            save_json(os.path.join(output_dir, f"{ts_name}.json"), final_gt_items, ts_name)
+            count += 1
+            
+        current_x += STRIDE
+    
+    print(f"  Generated {count} samples.")
 
 def main():
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
         
-    poses = load_poses(POSE_DIR)
-    all_points = load_pcd_fast(PCD_PATH)
-    gt_items = load_gt_items(GT_JSON_PATH)
+    # Search for all _annotation_raw_data folders
+    raw_dirs = glob.glob(os.path.join(SOURCE_ROOT, "*_annotation_raw_data"))
     
-    # Determine the path length
-    x_min = poses[0]['x']
-    x_max = poses[-1]['x']
-    total_len = x_max - x_min
+    print(f"Found {len(raw_dirs)} datasets in {SOURCE_ROOT}")
     
-    print(f"Path covers X: {x_min:.1f} to {x_max:.1f} (Length: {total_len:.1f}m)")
-    
-    # Sliding window
-    current_x = x_min + SEGMENT_LEN / 2 
-    # Start center at first 25m mark (window 0-50)
-    
-    seg_idx = 0
-    
-    while current_x < x_max:
-        # 1. Find the pose closest to current_x
-        # Using simple min distance sort (could be optimized with bisect but poses len is small < 1000)
-        closest_pose = min(poses, key=lambda p: abs(p['x'] - current_x))
+    for d in raw_dirs:
+        # Infer GT json path
+        # Directory: .../NAME_annotation_raw_data
+        # Expected GT: .../NAME.bag.json
         
-        # Check if pose is reasonably close (e.g. within 5m of target center)
-        # If gaps in data, might be far.
-        dist_to_center = abs(closest_pose['x'] - current_x)
-        if dist_to_center > 10.0:
-            print(f"Warning: No pose close to x={current_x:.1f} (closest {dist_to_center:.1f}m away). Skipping.")
-            current_x += STRIDE
-            continue
+        dir_name = os.path.basename(d)
+        if dir_name.endswith("_annotation_raw_data"):
+            base_name = dir_name[:-20] # remove _annotation_raw_data
             
-        ts_name = closest_pose['filename_ts']
-        print(f"Processing Segment {seg_idx}: center_x={current_x:.1f}, matches pose {ts_name}")
-        
-        # 2. Pre-filter global points to avoid transforming everything
-        # Just grab points within +/- 50m bounding box of the pose global position
-        # This is a safe superset of the final 50m ( +/- 25m ) local crop
-        # Note: This assumes X-aligned path roughly. 
-        # For curves, 50m radius search is better.
-        dx = all_points[:, 0] - closest_pose['x']
-        dy = all_points[:, 1] - closest_pose['y']
-        
-        # 2D radius filter squared
-        dist_sq = dx**2 + dy**2
-        mask_radius = dist_sq < (60**2) # 60m radius
-        
-        subset_points = all_points[mask_radius].copy()
-        
-        if len(subset_points) == 0:
-            print("  Empty point cloud in this region.")
-            current_x += STRIDE
-            continue
+            # Try probable GT paths
+            gt_candidate_1 = os.path.join(SOURCE_ROOT, f"{base_name}.bag.json")
+            gt_candidate_2 = os.path.join(SOURCE_ROOT, f"{base_name}.json")
             
-        # 3. Transform to Local Frame of the closest_pose
-        local_points = transform_to_local(subset_points, closest_pose)
-        
-        # 4. Final Crop: Local X in [-25, 25]
-        # X axis in local frame usually is Forward.
-        mask_final = (local_points[:, 0] >= -SEGMENT_LEN/2) & (local_points[:, 0] <= SEGMENT_LEN/2)
-        final_points = local_points[mask_final]
-        
-        # 5. Process GT
-        final_gt_items = []
-        for item in gt_items:
-            # Transform line points
-            local_line = transform_to_local(item['points'], closest_pose)
-            
-            # Clip polyline to X range [-25, 25]
-            clipped_line = clip_polyline_by_x(local_line, -SEGMENT_LEN/2, SEGMENT_LEN/2)
-            
-            if len(clipped_line) > 1:
-                final_gt_items.append({
-                    'category': item['category'],
-                    'points': clipped_line,
-                    'attributes': item['attributes']
-                })
-        
-        # 6. Save
-        pcd_out = os.path.join(OUTPUT_DIR, f"{ts_name}.pcd")
-        json_out = os.path.join(OUTPUT_DIR, f"{ts_name}.json")
-        
-        save_pcd(pcd_out, final_points)
-        save_json(json_out, final_gt_items, ts_name)
-        
-        print(f"  Saved {len(final_points)} points, {len(final_gt_items)} lines.")
-        
-        current_x += STRIDE
-        seg_idx += 1
+            if os.path.exists(gt_candidate_1):
+                process_dataset(d, gt_candidate_1, OUTPUT_DIR)
+            elif os.path.exists(gt_candidate_2):
+                process_dataset(d, gt_candidate_2, OUTPUT_DIR)
+            else:
+                print(f"Warning: Could not find GT json for {base_name}")
+                print(f"Tried: {gt_candidate_1}\n       {gt_candidate_2}")
 
 if __name__ == "__main__":
     main()

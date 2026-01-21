@@ -38,6 +38,7 @@ class LineRefineNet(nn.Module):
             nn.ReLU()
         )
         
+        
         # 3. Fusion & Regressor
         # Concatenate: [GlobalContext(512), PointFeat(128)] -> 640
         self.regressor = nn.Sequential(

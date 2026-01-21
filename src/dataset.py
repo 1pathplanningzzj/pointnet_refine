@@ -46,8 +46,32 @@ def load_pcd_data(pcd_path):
         print(f"Error loading {pcd_path}: {e}")
         return np.zeros((0, 4), dtype=np.float32)
 
+def weighted_sampling(context_points, noisy_points, num_samples=1024):
+    """
+    Weighted sampling based on distance to the lane line.
+    Points closer to the line have higher probability of being sampled.
+    """
+    if len(context_points) <= num_samples:
+        if len(context_points) == 0:
+            return np.zeros((num_samples, 4))
+        # If fewer points than needed, sample with replacement to fill up
+        choice = np.random.choice(len(context_points), num_samples, replace=True)
+        return context_points[choice]
+
+    # Calculate distance from each context point to the nearest noisy line point
+    tree = KDTree(noisy_points)
+    distances, _ = tree.query(context_points[:, :3])
+
+    # Weights decay exponentially with distance
+    # Scale 0.5 means weight drops to ~36% at 0.5m, ~13% at 1.0m
+    weights = np.exp(-distances / 0.5)
+    weights = weights / (weights.sum() + 1e-6) # Normalize
+
+    choice = np.random.choice(len(context_points), num_samples, replace=False, p=weights)
+    return context_points[choice]
+
 class LaneRefineDataset(Dataset):
-    def __init__(self, data_root, num_line_points=32, num_context_points=1024, crop_radius=2.0, split='train'):
+    def __init__(self, data_root, num_line_points=32, num_context_points=1024, crop_radius=1.0, split='train'):
         self.data_root = data_root
         self.files = [f for f in os.listdir(data_root) if f.endswith('.json')]
         self.num_line_points = num_line_points
@@ -115,34 +139,30 @@ class LaneRefineDataset(Dataset):
         gt_points = resample_polyline(gt_points_raw, self.num_line_points)
         noisy_points = resample_polyline(noisy_points_raw, self.num_line_points)
         
-        # 4. Crop Context Points
-        # Use centroid of noisy line to find nearby points
-        center = np.mean(noisy_points, axis=0)
-        
-        # Simple distance check (using broadcasting or KDTree)
-        # Using numpy slicing for simplicity on small clouds, KDTree for large
-        if len(pcd_points) > 0:
-            dists = np.linalg.norm(pcd_points[:, :3] - center, axis=1)
+        # 4. Crop Context Points (Cylindrical / Distance-based)
+        # Instead of simple sphere check around centroid, check distance to the polyline itself
+        if len(pcd_points) > 0 and len(noisy_points) > 0:
+            # Build KDTree for the noisy line points
+            tree = KDTree(noisy_points)
+            
+            # Query the distance from every PCD point to the nearest line point
+            # pcd_points[:, :3] shape: (N, 3)
+            # tree contains M points (e.g. 32)
+            dists, _ = tree.query(pcd_points[:, :3])
+            
+            # Keep points within crop_radius of the *line*
             mask = dists < self.crop_radius
             context_points = pcd_points[mask]
         else:
             context_points = np.zeros((0, 4))
             
-        # 5. Resample Context Points
-        if len(context_points) < self.num_context_points:
-            # Pad with zeros or repeat
-            if len(context_points) == 0:
-                 context_points = np.zeros((self.num_context_points, 4))
-            else:
-                choice = np.random.choice(len(context_points), self.num_context_points, replace=True)
-                context_points = context_points[choice]
-        else:
-            choice = np.random.choice(len(context_points), self.num_context_points, replace=False)
-            context_points = context_points[choice]
+        # 5. Weighted Sampling
+        context_points = weighted_sampling(context_points, noisy_points, self.num_context_points)
             
         # 6. Normalization
         # Center everything to the noisy line centroid
         # This makes the network translation invariant
+        center = np.mean(noisy_points, axis=0) # Re-calculate center for normalization
         context_xyz = context_points[:, :3] - center
         context_intensity = context_points[:, 3:4]
         
