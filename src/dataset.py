@@ -135,6 +135,13 @@ class LaneRefineDataset(Dataset):
         gt_points_raw = np.array([[p['x'], p['y'], p['z']] for p in item['position']])
         noisy_points_raw = np.array([[p['x'], p['y'], p['z']] for p in item['noisy_candidates'][sample_info['noise_idx']]])
 
+        # Create context lines list
+        context_gt_lines = []
+        if 'context_lines' in item:
+            for l in item['context_lines']:
+                 if len(l) > 0:
+                     context_gt_lines.append(np.array([[p['x'], p['y'], p['z']] for p in l]))
+
         # 3. Resample Lines to fixed size
         gt_points = resample_polyline(gt_points_raw, self.num_line_points)
         noisy_points = resample_polyline(noisy_points_raw, self.num_line_points)
@@ -173,8 +180,14 @@ class LaneRefineDataset(Dataset):
         # Target: Offset(M, 3) -> GT - Noisy
         target_offset = gt_line_centered - noisy_line_centered
         
+        # Normalize context lines too
+        context_lines_norm = []
+        for l in context_gt_lines:
+            context_lines_norm.append(l - center)
+
         return {
             'context': torch.from_numpy(np.hstack([context_xyz, context_intensity])).float(), # (N, 4)
             'noisy_line': torch.from_numpy(noisy_line_centered).float(), # (M, 3)
-            'target_offset': torch.from_numpy(target_offset).float() # (M, 3)
+            'target_offset': torch.from_numpy(target_offset).float(), # (M, 3)
+            'context_lines': context_lines_norm # List of arrays
         }

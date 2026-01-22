@@ -12,10 +12,10 @@ from src.dataset import LaneRefineDataset
 from src.model import LineRefineNet
 
 # Config
-DATA_DIR = "./train_data"
-MODEL_PATH = "checkpoints/refine_model_epoch_50.pth"
-OUTPUT_HTML_DIR = "./inference_vis_epoch10"
-NUM_VIS_SAMPLES = 10  # Visualize 10 samples
+DATA_DIR = "./vma_infer_data"
+MODEL_PATH = "checkpoints/refine_model_epoch_100.pth"
+OUTPUT_HTML_DIR = "./vma_inference_vis"
+NUM_VIS_SAMPLES = 100  # Visualize all samples
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 
@@ -111,8 +111,92 @@ def main():
                 mode='lines+markers',
                 marker=dict(size=3, color='green'),
                 line=dict(color='green', width=5),
-                name='Ground Truth'
+                name='Target GT'
             ))
+
+            # 3b. Plot ALL Context GT Lines (Yellow/Grey)
+            if 'context_lines' in batch:
+                # batch['context_lines'] is a LIST of tensors/arrays
+                # But DataLoader collate_fn might have stacked them if they were same length 
+                # OR it's a list if using custom collate. 
+                # Standard default_collate fails on lists of variable size arrays. 
+                # But I added it to the dict. `dataset.py` returns list of numpy arrays.
+                # Default collate usually crashes if elements are lists of varying len arrays.
+                # If they are just lists, maybe it works?
+                # Actually, wait. dataset returns a DICT. 
+                # If 'context_lines' is a list of arrays (variable size), default_collate MIGHT fail or turn it into list of tensors (if same size).
+                # But here batch size is 1. So it's probably [ [Line1, Line2] ]
+                
+                # Let's inspect variable
+                ctx_lines = batch['context_lines']
+                # Since batch_size=1, ctx_lines should be a list of length 1 (the batch).
+                # Inside that, it depends on how collate handled the list of arrays.
+                # If collate didn't touch it, it is [ sample0_lines ]
+                
+                # Safely trying to iterate
+                try:
+                    # Depending on PyTorch version and collate:
+                    # If it's a list of lists of tensors:
+                    sample_lines = ctx_lines
+                    if isinstance(sample_lines, list):
+                        # Flatten? No, structure is [Batch_Sample0_List, Batch_Sample1_List...]
+                        # But here batch is 1.
+                        # Actually default_collate is smart about lists.
+                        # It transposes. [ [L1a, L1b], [L2a, L2b] ] -> [ [L1a, L2a], [L1b, L2b] ]
+                        # BUT lines are VARIABLE length list. So it might have errored out or left it?
+                        # Let's just assume we can get it from the dataset directly if needed, 
+                        # but let's try to parse what we have.
+                        
+                        # Assuming batch_size=1, it might be just the list for sample 0
+                        # But let's look at visualization logic.
+                        # center = batch['center'][0] -> we need to ADD center back for visualization? 
+                        # No, noisy_np is already "centered" by dataset?
+                        # Wait, dataset returns `noisy_line_centered`. 
+                        # So `noisy_np` IS centered. 
+                        # But `gt_line_np` = `noisy` + `gt_offset`, so it is also centered.
+                        # `pred_line_np` is also centered.
+                        # So to plot Context Lines, they must be centered too.
+                        # Dataset returns `context_lines_norm`. Good.
+                        
+                        # Getting sample 0 lines:
+                        # Iterate everything in ctx_lines and try to plot
+                        for idx, line_tensor in enumerate(ctx_lines):
+                            # In DataLoader with batch_size=1, sometimes it unzips logic
+                            # It's safer to access the original dataset if we want consistent behavior
+                            # but let's try.
+                            pass
+                except:
+                    pass
+                
+                # The robust way with batch_size=1 is:
+                current_lines = []
+                # Check based on type
+                if isinstance(ctx_lines, list):
+                     # Likely [Line1_Batch, Line2_Batch...] if lines were consistent count?
+                     # No, if variable count, PyTorch 1.x usually leaves it as list of inputs?
+                     pass
+                
+                # Let's simplify: Just iterate `ctx_lines` and see if they look like tensors
+                flat_lines = []
+                
+                # Recursively flatten lists
+                def extract_tensors(item):
+                    if torch.is_tensor(item):
+                        if item.dim() >= 2: flat_lines.append(item[0].cpu().numpy()) # Take batch 0
+                    elif isinstance(item, list):
+                        for sub in item: extract_tensors(sub)
+                
+                extract_tensors(ctx_lines)
+                
+                for ln_idx, ln_np in enumerate(flat_lines):
+                     if ln_np.shape[-1] != 3: continue
+                     
+                     fig.add_trace(go.Scatter3d(
+                        x=ln_np[:,0], y=ln_np[:,1], z=ln_np[:,2],
+                        mode='lines',
+                        line=dict(color='yellow', width=2),
+                        name=f'Context GT {ln_idx}'
+                    ))
             
             # 4. Plot Refined Output (Blue Solid)
             fig.add_trace(go.Scatter3d(
