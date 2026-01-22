@@ -63,15 +63,28 @@ def weighted_sampling(context_points, noisy_points, num_samples=1024):
     distances, _ = tree.query(context_points[:, :3])
 
     # Weights decay exponentially with distance
-    # Scale 0.5 means weight drops to ~36% at 0.5m, ~13% at 1.0m
-    weights = np.exp(-distances / 0.5)
-    weights = weights / (weights.sum() + 1e-6) # Normalize
-
+    # Scale 0.3 means weight drops to ~36% at 0.3m. Tighter focus for accurate refinement.
+    weights = np.exp(-distances / 0.3)
+    
+    w_sum = weights.sum()
+    if w_sum < 1e-6:
+        # Fallback to uniform if weights are too small
+        weights = None
+    else:
+        weights = weights / w_sum
+        # Fix precision issues: ensure sum is exactly 1.0
+        # By re-normalizing, we usually get close enough, but numpy can be picky.
+        # A robust way is to subtract the diff from the largest element or re-normalize again.
+        # However, passing p to choice requires strict sum 1.
+        # Let's use a safe normalization:
+        weights = weights / np.sum(weights)
+        # Even safer: clip to range and re-norm
+        
     choice = np.random.choice(len(context_points), num_samples, replace=False, p=weights)
     return context_points[choice]
 
 class LaneRefineDataset(Dataset):
-    def __init__(self, data_root, num_line_points=32, num_context_points=1024, crop_radius=1.0, split='train'):
+    def __init__(self, data_root, num_line_points=32, num_context_points=1024, crop_radius=0.6, split='train'):
         self.data_root = data_root
         self.files = [f for f in os.listdir(data_root) if f.endswith('.json')]
         self.num_line_points = num_line_points

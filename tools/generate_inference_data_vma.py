@@ -3,6 +3,7 @@ import json
 import numpy as np
 import glob
 import math
+from scipy.optimize import linear_sum_assignment
 
 # --- 1. Helper Config ---
 BAG_BASE_NAME = "TAD_front_vision_2025-08-20-11-52-36_85_5to25_0"
@@ -100,7 +101,7 @@ def transform_to_local(global_pts, pose):
     # If using row vectors: local_row = (global - T) @ R
     
 
-    local_xyz = np.dot(centered, rot_matrix) # Equivalent to v @ R
+    local_xyz = np.dot(centered, inv_rot) # v @ R.T
     
     return local_xyz
 
@@ -116,7 +117,7 @@ def load_poses(pose_dir):
             ts = data['ts']
             try:
                 ts_int = int(os.path.splitext(os.path.basename(f))[0])
-            except:
+            except (ValueError, TypeError):
                 ts_int = int(ts)
                 
             poses.append({
@@ -127,7 +128,7 @@ def load_poses(pose_dir):
                 'q': [data['qx'], data['qy'], data['qz'], data['qw']]
             })
     
-    poses.sort(key=lambda p: p['x'])
+    poses.sort(key=lambda p: p['ts'])
     print(f"Loaded {len(poses)} poses.")
     return poses
 
@@ -194,7 +195,7 @@ def pixel_to_ego(pixel_points, img_shape=(1000, 1000), res=0.05):
     for u, v in pixel_points:
         # Standard mapping: X is forward (up in image), Y is left
         x = (H - v) * res
-        y = (W/2 - u) * res
+        y = (W / 2.0 - u) * res
         ego_points.append({'x': float(x), 'y': float(y), 'z': 0.0})
     return ego_points
 
@@ -338,74 +339,69 @@ def main():
         vma_entry = results_data[key]
         pred_instances = vma_entry.get('pred_instances', [])
         
-        vma_items = []
-        for inst_idx, inst in enumerate(pred_instances):
+        # --- Pre-Process: Collect all Preds ---
+        pred_lines_3d = []
+        pred_scores = []
+        for inst in pred_instances:
             poly_2d = inst['data']
-            
-            # Convert Pixel to Ego
             poly_3d = pixel_to_ego(poly_2d)
-
-            # Assign a matched GT line if available (Naively take first one or None)
-            # Since we have multiple VMA predictions and multiple GT lines, matching is hard.
-            # But for Visualization, we can put ALL valid GT lines into the FIRST item, 
-            # or distribute them. 
-            # Actually, `dataset.py` might expect `position` to be a SINGLE line (the GT target).
-            # If we don't know the pairing, we can't train effectively, but for INFERENCE VIS,
-            # we just want to see Blue lines.
-            
-            # Hack: Put the first found GT line into the first VMA item, etc.
-            # Or better: Put ALL GT lines into the 'position' of the first item? No, 'position' is List[Pt].
-            
-            # Let's pick the spatial closest GT for visualization?
-            # UPDATED MATCHING LOGIC: Use Chamfer Distance (Pred -> GT) instead of Centroid
-            cand_pts = np.array([[p['x'], p['y']] for p in poly_3d])
-            # cand_mean = np.mean(cand_pts, axis=0)
-            
-            best_gt = []
-            min_dist = 9999.0
-            
-            # DEBUG Info
-            if inst_idx == 0:
-                 print(f"    [VMA] Pred Points: {len(cand_pts)}")
-            
-            for gt_line in local_gt_lines_for_vis:
-                 gt_pts = np.array([[p['x'], p['y']] for p in gt_line])
-                 
-                 # Chamfer Distance: Mean of min distances from Pred points to GT points
-                 if len(gt_pts) < 1: continue
-                 
-                 # Broadcast subtraction: (M, 1, 2) - (1, N, 2) -> (M, N, 2)
-                 diff = cand_pts[:, None, :] - gt_pts[None, :, :]
-                 dists_matrix = np.linalg.norm(diff, axis=2) # (M, N)
-                 
-                 # For each point in Pred, find closest point in GT
-                 min_dists = np.min(dists_matrix, axis=1) # (M,)
-                 dist = np.mean(min_dists) # scalar
-                 
-                 # Debug first few GTs
-                 if inst_idx == 0 and dist < 10.0: 
-                     print(f"      [GT-Check] CDist: {dist:.2f}m")
-
-                 if dist < min_dist:
-                     min_dist = dist
-                     best_gt = gt_line
-            
-            # Tighter threshold for Chamfer Distance (e.g. 15.0m is safe enough)
-            matched_gt_pos = best_gt if min_dist < 15.0 else []
-            if len(matched_gt_pos) == 0:
-                print(f"    [NO MATCH] closest GT was {min_dist:.1f}m away")
-            else:
-                print(f"    [MATCH] Found GT {min_dist:.1f}m away")
-
             if len(poly_3d) > 1:
-                item_dict = {
-                    'category': 'lane_line', 
-                    'attributes': {'score': inst.get('score', 0.0)},
-                    'position': matched_gt_pos, # Assigned nearest GT
-                    'noisy_candidates': [poly_3d],
-                    'context_lines': local_gt_lines_for_vis # Pass ALL GT lines for visualization
-                }
-                vma_items.append(item_dict)
+                pred_lines_3d.append(poly_3d)
+                pred_scores.append(inst.get('score', 0.0))
+        
+        # --- Hungarian Matching (Global Assignment) ---
+        # Cost Matrix: Rows=Preds, Cols=GTs
+        num_preds = len(pred_lines_3d)
+        num_gts = len(local_gt_lines_for_vis)
+        
+        matched_gt_indices = {} # PredIdx -> GTIdx
+        
+        if num_preds > 0 and num_gts > 0:
+            cost_matrix = np.full((num_preds, num_gts), 1000.0) # Init with high cost
+            
+            for i, p_line in enumerate(pred_lines_3d):
+                p_pts = np.array([[p['x'], p['y']] for p in p_line])
+                
+                for j, g_line in enumerate(local_gt_lines_for_vis):
+                    g_pts = np.array([[p['x'], p['y']] for p in g_line])
+                    if len(g_pts) < 1: continue
+                    
+                    # Chamfer Distance (One-way: Pred -> GT)
+                    # For each point in Pred, find closest in GT, then average
+                    diff = p_pts[:, None, :] - g_pts[None, :, :]
+                    dists_matrix = np.linalg.norm(diff, axis=2) # (M, N)
+                    min_dists = np.min(dists_matrix, axis=1) # (M,)
+                    dist = np.mean(min_dists)
+                    
+                    cost_matrix[i, j] = dist
+            
+            # Solve Assignment
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            
+            # Filter by Threshold
+            MATCH_THRESHOLD = 15.0
+            for r, c in zip(row_ind, col_ind):
+                if cost_matrix[r, c] < MATCH_THRESHOLD:
+                    matched_gt_indices[r] = c
+                else:
+                    pass # Too far, leave unmatched
+
+        # --- Construct Items ---
+        vma_items = []
+        for i, poly_3d in enumerate(pred_lines_3d):
+            best_gt = []
+            if i in matched_gt_indices:
+                gt_idx = matched_gt_indices[i]
+                best_gt = local_gt_lines_for_vis[gt_idx]
+                
+            item_dict = {
+                'category': 'lane_line', 
+                'attributes': {'score': pred_scores[i]},
+                'position': best_gt, # Matched GT or empty
+                'noisy_candidates': [poly_3d],
+                'context_lines': local_gt_lines_for_vis
+            }
+            vma_items.append(item_dict)
         
         if len(vma_items) > 0:
             pcd_out = os.path.join(OUTPUT_DIR, f"{res_ts}.pcd")

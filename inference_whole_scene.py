@@ -19,39 +19,53 @@ OUTPUT_HTML_DIR = "./vma_inference_vis_whole_scene"
 NUM_VIS_SAMPLES = 50  # Number of SCENES to visualize
 NUM_LINE_POINTS = 32
 NUM_CONTEXT_POINTS = 1024
-CROP_RADIUS = 1.0
+CROP_RADIUS = 0.6  # Reduced to ignore distant noise
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 
 def crop_gt_to_pred_range(gt_points, pred_points):
     """
-    Crops the GT polyline to cover approximately the same range as the prediction along the X-axis.
-    Assumption: Lines are primarily along the X-axis (forward).
+    Crops the GT polyline to the segment closest to the start and end of the prediction.
+    Uses nearest neighbor search to find corresponding start/end points on GT.
+    Also handles direction alignment (flips GT crop if necessary to minimize ADE).
     """
     if len(gt_points) < 2 or len(pred_points) < 2:
         return gt_points
+    
+    # Prediction start and end
+    pred_start = pred_points[0]
+    pred_end = pred_points[-1]
+    
+    # Distances to all GT points
+    dists_start = np.linalg.norm(gt_points - pred_start, axis=1)
+    dists_end = np.linalg.norm(gt_points - pred_end, axis=1)
+    
+    idx_start = np.argmin(dists_start)
+    idx_end = np.argmin(dists_end)
+    
+    # Determine crop indices
+    idx_min = min(idx_start, idx_end)
+    idx_max = max(idx_start, idx_end)
+    
+    # Ensure we get a valid segment (at least 2 points if possible)
+    if idx_min == idx_max:
+        idx_min = max(0, idx_min - 1)
+        idx_max = min(len(gt_points)-1, idx_max + 1)
         
-    x_min = np.min(pred_points[:, 0])
-    x_max = np.max(pred_points[:, 0])
+    cropped_gt = gt_points[idx_min : idx_max + 1]
     
-    # Extend slightly to ensure coverage
-    x_min = max(x_min - 0.5, 0) # Don't go behind ego
-    x_max = x_max + 0.5
-    
-    # Simple filtering for points within range
-    # Note: This is a discrete crop. For better precision, one should interpolate the cut points.
-    # But for metric calculation, points within the bounding box are usually enough.
-    
-    # Better approach: Find the segment of GT that projects onto [x_min, x_max]
-    # We cheat by using the numpy logical filter, which might lose segments between points if points are sparse.
-    # However, GT is usually dense enough.
-    
-    mask = (gt_points[:, 0] >= x_min) & (gt_points[:, 0] <= x_max)
-    cropped_gt = gt_points[mask]
-    
-    # Fallback: if crop turns up empty (e.g. misalignment), return original or nearest segment
     if len(cropped_gt) < 2:
-        return gt_points 
+        return gt_points
+        
+    # Check direction: Does the crop run Start->End or End->Start?
+    # We compare distances of endpoints to ensure alignment with Pred
+    # Case 1: GT[0] matches Pred[0] -> Dist is small
+    d_normal = np.linalg.norm(cropped_gt[0] - pred_start) + np.linalg.norm(cropped_gt[-1] - pred_end)
+    # Case 2: GT[0] matches Pred[-1] -> Dist is small (Reverse)
+    d_reverse = np.linalg.norm(cropped_gt[0] - pred_end) + np.linalg.norm(cropped_gt[-1] - pred_start)
+    
+    if d_reverse < d_normal:
+        cropped_gt = cropped_gt[::-1]
         
     return cropped_gt
 

@@ -15,7 +15,8 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 1. Data
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=1.0)
+    # Reduced crop_radius to 0.6m for finer local context
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.6)
     dataloader = DataLoader(
         dataset, 
         batch_size=BATCH_SIZE, 
