@@ -307,8 +307,15 @@ def main():
             continue
             
         # Transform PCD to Local Ego Frame
-        local_points = transform_to_local(subset_points, closest_pose)
+        local_xyz = transform_to_local(subset_points, closest_pose)
         
+        # Re-attach intensity (Column 3)
+        # local_xyz is (N, 3), subset_points is (N, 4)
+        if subset_points.shape[1] >= 4:
+            local_points = np.hstack([local_xyz, subset_points[:, 3:4]])
+        else:
+            local_points = local_xyz
+
         # Crop to strict ROI (Forward 0 to 50m)
         mask_final = (local_points[:, 0] >= 0) & (local_points[:, 0] <= SEGMENT_LEN)
         final_points = local_points[mask_final]

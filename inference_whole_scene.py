@@ -14,12 +14,12 @@ from src.model import LineRefineNet
 
 # Config
 DATA_DIR = "./vma_infer_data"
-MODEL_PATH = "checkpoints/refine_model_epoch_100.pth"
+MODEL_PATH = "checkpoints/refine_model_epoch_50.pth"
 OUTPUT_HTML_DIR = "./vma_inference_vis_whole_scene"
 NUM_VIS_SAMPLES = 50  # Number of SCENES to visualize
 NUM_LINE_POINTS = 32
 NUM_CONTEXT_POINTS = 1024
-CROP_RADIUS = 0.6  # Reduced to ignore distant noise
+CROP_RADIUS = 0.3  # Reduced to ignore distant noise
 
 os.makedirs(OUTPUT_HTML_DIR, exist_ok=True)
 
@@ -79,7 +79,9 @@ def process_single_line(model, pcd_points, noisy_line_raw, device):
     
     # 2. Crop Context (Same logic as Dataset for consistency)
     if len(pcd_points) > 0 and len(noisy_points) > 0:
-        tree = KDTree(noisy_points)
+        # Use dense points for cropping to eliminate gaps
+        noisy_lines_dense = resample_polyline(noisy_line_raw, 200)
+        tree = KDTree(noisy_lines_dense)
         dists, _ = tree.query(pcd_points[:, :3])
         mask = dists < CROP_RADIUS
         context_points = pcd_points[mask]
@@ -109,12 +111,16 @@ def process_single_line(model, pcd_points, noisy_line_raw, device):
     # 6. Forward
     model.eval()
     with torch.no_grad():
-        pred_offset = model(tensor_pcd, tensor_noisy) # (1, 32, 3)
+        # Output is (L, B, M, 3)
+        offsets_stack = model(tensor_pcd, tensor_noisy) 
+        # Take the LAST layer output
+        final_offset = offsets_stack[-1] # (1, 32, 3)
         
     # 7. Restore Coordinates
-    pred_offset_np = pred_offset[0].cpu().numpy()
+    pred_offset_np = final_offset[0].cpu().numpy()
     
     # Refined = (Noisy - C) + Offset + C = Noisy + Offset
+    # The model predicts accumulation offset from initial noisy line
     refined_line = noisy_points + pred_offset_np
     
     return refined_line, noisy_points
@@ -162,10 +168,20 @@ def main():
         # Initialize Figure
         fig = go.Figure()
         
+        # --- Analyze Intensity Stats ---
+        intensities = full_pcd[:, 3]
+        if len(intensities) > 0:
+            p50 = np.percentile(intensities, 50)
+            p90 = np.percentile(intensities, 90)
+            p99 = np.percentile(intensities, 99)
+            print(f"    [Intensity Stats] Min: {intensities.min():.1f}, P50: {p50:.1f}, P90: {p90:.1f}, P99: {p99:.1f}, Max: {intensities.max():.1f}")
+
         # --- Plot Background PCD ---
-        # Subsample for display (e.g. max 20k points)
-        if len(full_pcd) > 20000:
-            indices = np.random.choice(len(full_pcd), 20000, replace=False)
+        # Subsample for display (e.g. limits to avoid browser crash, but 20k is too sparse)
+        # Increased to 200k for denser visualization
+        MAX_POINTS = 400000
+        if len(full_pcd) > MAX_POINTS:
+            indices = np.random.choice(len(full_pcd), MAX_POINTS, replace=False)
             plot_pcd = full_pcd[indices]
         else:
             plot_pcd = full_pcd
@@ -174,15 +190,18 @@ def main():
             x=plot_pcd[:, 0], y=plot_pcd[:, 1], z=plot_pcd[:, 2],
             mode='markers',
             marker=dict(
-                size=1.0,
+                size=1.5,
                 color=plot_pcd[:, 3], # Intensity
-                colorscale='Viridis',
-                cmin=0, cmax=30,
-                opacity=0.5
+                colorscale='Jet',
+                cmin=1, 
+                cmax=40,
+                showscale=True,
+                colorbar=dict(title="Intensity"),
+                opacity=0.8
             ),
             name='Scene Point Cloud'
         ))
-        
+
         # --- Plot Context GT Lines (Once per Scene) ---
         # Extract from the first item if available (all items share the same context lines)
         if len(items) > 0:
@@ -218,7 +237,7 @@ def main():
                 fig.add_trace(go.Scatter3d(
                     x=gt_points[:,0], y=gt_points[:,1], z=gt_points[:,2],
                     mode='lines', # solid
-                    line=dict(color='green', width=5),
+                    line=dict(color='green', width=2),
                     name=f'GT Line {item_idx}'
                 ))
 
@@ -254,22 +273,22 @@ def main():
                 fig.add_trace(go.Scatter3d(
                     x=resampled_noisy[:,0], y=resampled_noisy[:,1], z=resampled_noisy[:,2],
                     mode='lines',
-                    line=dict(color='red', width=3, dash='dash'),
+                    line=dict(color='red', width=1.5, dash='dash'),
                     name=f'Noisy {item_idx}{metric_info}'
                 ))
                 
-                # Plot Refined (Cyan)
+                # Plot Refined (Magenta)
                 fig.add_trace(go.Scatter3d(
                     x=refined_arr[:,0], y=refined_arr[:,1], z=refined_arr[:,2],
                     mode='lines+markers',
-                    marker=dict(size=2, color='cyan'),
-                    line=dict(color='cyan', width=4),
+                    marker=dict(size=1.5, color='magenta'),
+                    line=dict(color='magenta', width=2),
                     name=f'Refined {item_idx}'
                 ))
 
         # Layout
         fig.update_layout(
-            title=f"Whoe Scene Refinement - {json_file}",
+            title=f"Whole Scene Refinement - {json_file}",
             scene=dict(
                 xaxis_title='X (m)',
                 yaxis_title='Y (m)',

@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 import torch.optim as optim
 import torch.distributed as dist
@@ -45,6 +46,13 @@ def get_logger(rank, save_dir="work_dirs/train_logs"):
     return logger
 
 def main():
+    # Parse args
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoints_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
+    args = parser.parse_args()
+    
+    CHECKPOINTS_DIR = args.checkpoints_dir
+
     # 0. DDP Setup
     # These environment variables are set by torchrun
     if "LOCAL_RANK" not in os.environ:
@@ -69,8 +77,8 @@ def main():
     DATA_ROOT = "train_data"
     
     # 1. Data
-    # crop_radius needs to match single GPU training
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=1.0)
+    # crop_radius needs to match single GPU training -> 0.3
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.3)
     
     # DistributedSampler handles data splitting across GPUs
     sampler = DistributedSampler(dataset, shuffle=True)
@@ -91,14 +99,15 @@ def main():
     
     # Wrap model with DDP
     # device_ids tells DDP which GPU this process uses
-    model = DDP(model, device_ids=[local_rank])
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     optimizer = optim.Adam(model.parameters(), lr=LR)
+    criterion = torch.nn.L1Loss()
     
     if global_rank == 0:
         logger.info(f"Start DDP training on {world_size} GPUs. Total Batch Size: {BATCH_SIZE_PER_GPU * world_size}")
-        if not os.path.exists("checkpoints"):
-            os.makedirs("checkpoints", exist_ok=True)
+        if not os.path.exists(CHECKPOINTS_DIR):
+            os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
     
     model.train()
     for epoch in range(EPOCHS):
@@ -113,11 +122,18 @@ def main():
             
             optimizer.zero_grad()
             
-            # Forward
-            pred_offset = model(context, noisy_line)
+            # Forward: Returns list [layer_1, layer_2, ..., layer_final]
+            # Output shape: (L, B, M, 3)
+            pred_offsets_stack = model(context, noisy_line)
             
-            # Loss
-            loss = F.mse_loss(pred_offset, target_offset)
+            # Deep Supervision Loss
+            loss = 0.0
+            num_layers = pred_offsets_stack.shape[0]
+            
+            for l in range(num_layers):
+                 loss += criterion(pred_offsets_stack[l], target_offset)
+            
+            loss = loss / num_layers
             
             loss.backward()
             optimizer.step()
@@ -136,11 +152,12 @@ def main():
             # Save checkpoint occasionally
             if (epoch+1) % 10 == 0:
                 # Use model.module when saving DDP model to get the underlying model weights
-                torch.save(model.module.state_dict(), f"checkpoints/refine_model_epoch_{epoch+1}.pth")
+                save_path = os.path.join(CHECKPOINTS_DIR, f"refine_model_epoch_{epoch+1}.pth")
+                torch.save(model.module.state_dict(), save_path)
 
     if global_rank == 0:
         logger.info("Training Complete.")
-        torch.save(model.module.state_dict(), "checkpoints/best_model.pth")
+        torch.save(model.module.state_dict(), os.path.join(CHECKPOINTS_DIR, "best_model.pth"))
     
     cleanup()
 

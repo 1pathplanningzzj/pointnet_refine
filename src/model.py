@@ -43,64 +43,94 @@ class MultiScalePointNetEncoder(nn.Module):
         avg_pool = torch.mean(fused, 2, keepdim=False)    # (B, 1024)
         global_feat = torch.cat([max_pool, avg_pool], dim=1)  # (B, 2048)
 
-        return global_feat, fused  # Return both global and point-wise features
+        return global_feat, fused
 
-class CrossAttentionModule(nn.Module):
-    """Transformer-style cross-attention: line points attend to context"""
-    def __init__(self, embed_dim=256, num_heads=8):
-        super(CrossAttentionModule, self).__init__()
-        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-
-        # Feed-forward network
-        self.ffn = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for 3D coordinates (or MLP based)"""
+    def __init__(self, in_dim=3, out_dim=256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, out_dim),
             nn.ReLU(),
-            nn.Linear(embed_dim * 4, embed_dim)
+            nn.Linear(out_dim, out_dim)
         )
+    def forward(self, xyz):
+        # xyz: (B, N, 3)
+        return self.mlp(xyz)
 
-    def forward(self, query, key_value):
+class DetrTransformerDecoderLayer(nn.Module):
+    """
+    Standard DETR-style Transformer Decoder Layer.
+    Decouples Content (tgt/memory) and Position (query_pos/pos).
+    """
+    def __init__(self, d_model=256, nhead=8, dim_feedforward=1024, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+
+        self.activation = F.relu
+
+    def with_pos_embed(self, tensor, pos):
+        return tensor if pos is None else tensor + pos
+
+    def forward(self, tgt, memory, query_pos=None, pos=None):
         """
-        query: (B, M, C) - line points
-        key_value: (B, N, C) - context points
+        tgt: (B, M, C) - Query Features (Line points)
+        memory: (B, N, C) - Key/Value Features (Context)
+        query_pos: (B, M, C) - Query Positional Encoding
+        pos: (B, N, C) - Memory Positional Encoding
         """
-        # Cross-attention
-        attn_out, _ = self.multihead_attn(query, key_value, key_value)
-        query = self.norm1(query + attn_out)
+        # 1. Self Attention (Query-Query)
+        # Q = K = tgt + query_pos
+        # V = tgt
+        q = k = self.with_pos_embed(tgt, query_pos)
+        tgt2 = self.self_attn(q, k, value=tgt)[0]
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt)
 
-        # Feed-forward
-        ffn_out = self.ffn(query)
-        query = self.norm2(query + ffn_out)
+        # 2. Cross Attention (Query-Memory)
+        # Q = tgt + query_pos
+        # K = memory + pos
+        # V = memory
+        q = self.with_pos_embed(tgt, query_pos)
+        k = self.with_pos_embed(memory, pos)
+        # Note: If memory is a mask, we need to pass it here. But we don't use mask for now.
+        tgt2 = self.cross_attn(q, k, value=memory)[0]
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt)
 
-        return query
+        # 3. FFN
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt)
 
-class ResidualBlock(nn.Module):
-    """Residual block for regressor"""
-    def __init__(self, in_dim, out_dim):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv1d(in_dim, out_dim, 1)
-        self.bn1 = nn.BatchNorm1d(out_dim)
-        self.conv2 = nn.Conv1d(out_dim, out_dim, 1)
-        self.bn2 = nn.BatchNorm1d(out_dim)
-
-        # Shortcut connection
-        self.shortcut = nn.Conv1d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
-
-    def forward(self, x):
-        residual = self.shortcut(x)
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        return F.relu(out + residual)
+        return tgt
 
 class LineRefineNet(nn.Module):
     def __init__(self, num_line_points=32, feature_dim=1024):
         super(LineRefineNet, self).__init__()
 
-        # 1. Multi-scale Context Encoder with dual pooling
-        self.context_encoder = MultiScalePointNetEncoder(in_channel=4, out_dim=feature_dim)
+        # Config
+        self.d_model = 256
+        self.num_decoder_layers = 6 # Increased to 6 for iterative refinement
 
-        # 2. Line Point Encoder (deeper)
+        # 1. Context Encoder (PointNet)
+        self.context_encoder = MultiScalePointNetEncoder(in_channel=4, out_dim=feature_dim)
+        self.context_proj = nn.Linear(feature_dim, self.d_model)
+
+        # 2. Line Encoder (Initial Query Features)
         self.point_mlp = nn.Sequential(
             nn.Conv1d(3, 64, 1),
             nn.BatchNorm1d(64),
@@ -108,73 +138,84 @@ class LineRefineNet(nn.Module):
             nn.Conv1d(64, 128, 1),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Conv1d(128, 256, 1),
-            nn.BatchNorm1d(256),
-            nn.ReLU()
+            nn.Conv1d(128, self.d_model, 1), 
+            nn.BatchNorm1d(self.d_model)
         )
+        
+        # 3. Positional Encoding
+        self.pos_emb = PositionalEncoding(in_dim=3, out_dim=self.d_model)
 
-        # 3. Projection layers for cross-attention
-        self.line_proj = nn.Linear(256, 256)
-        self.context_proj = nn.Linear(feature_dim, 256)
+        # 4. Decoder Layers (Iterative)
+        self.decoder_layers = nn.ModuleList([
+            DetrTransformerDecoderLayer(d_model=self.d_model, nhead=8, dim_feedforward=1024)
+            for _ in range(self.num_decoder_layers)
+        ])
 
-        # 4. Cross-Attention Module
-        self.cross_attention = CrossAttentionModule(embed_dim=256, num_heads=8)
-
-        # 5. Fusion & Deep Regressor with Residual Blocks
-        # Input: [GlobalContext(2048), AttendedLineFeat(256)] -> 2304
-        self.fusion_proj = nn.Sequential(
-            nn.Conv1d(feature_dim * 2 + 256, 512, 1),
-            nn.BatchNorm1d(512),
-            nn.ReLU()
-        )
-
-        self.regressor = nn.Sequential(
-            ResidualBlock(512, 512),
-            ResidualBlock(512, 256),
-            ResidualBlock(256, 128),
-            nn.Conv1d(128, 64, 1),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, 3, 1)  # Predict dx, dy, dz
-        )
+        # 5. Regression Heads (One per layer, or shared)
+        # Here we use separate heads for flexibility
+        self.reg_branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.d_model, 128),
+                nn.ReLU(),
+                nn.Linear(128, 3) # dx, dy, dz
+            )
+            for _ in range(self.num_decoder_layers)
+        ])
 
     def forward(self, context, noisy_line):
         """
-        context: (B, N, 4) - Point Cloud
-        noisy_line: (B, M, 3) - Noisy Polyline
+        context: (B, N, 4) - Point Cloud [x,y,z,i]
+        noisy_line: (B, M, 3) - Noisy Polyline [x,y,z]
+        Returns: 
+           all_offsets_stack: (num_layers, B, M, 3) - Cumulative offsets at each layer
         """
-        B, N, _ = context.shape
+        B, N, C = context.shape
         M = noisy_line.shape[1]
 
-        # Transpose for Conv1d: (B, C, N)
-        ctx = context.transpose(2, 1)
-        line = noisy_line.transpose(2, 1)
+        # --- 1. Encode Context (Memory) ---
+        ctx_trans = context.transpose(2, 1)
+        _, ctx_pointwise = self.context_encoder(ctx_trans) 
+        memory = self.context_proj(ctx_pointwise.transpose(2, 1)) # (B, N, 256)
+        
+        # Memory Position Embedding (Constant)
+        pos_mem = self.pos_emb(context[:, :, :3]) # (B, N, 256)
 
-        # 1. Encode Context -> Global Feature + Point-wise Features
-        global_feat, ctx_pointwise = self.context_encoder(ctx)  # (B, 2048), (B, 1024, N)
+        # --- 2. Encode Line (Initial Query) ---
+        line_feat = self.point_mlp(noisy_line.transpose(2, 1))
+        tgt = line_feat.transpose(2, 1) # (B, M, 256)
 
-        # 2. Encode Line Points
-        point_feat = self.point_mlp(line)  # (B, 256, M)
+        # Initialize Refined Line Coordinates (for iterative updates)
+        current_line_coords = noisy_line.clone() # (B, M, 3)
+        
+        all_pred_offsets = []
 
-        # 3. Cross-Attention: line points attend to context
-        # Prepare for attention: (B, M, 256) and (B, N, 256)
-        line_tokens = self.line_proj(point_feat.transpose(2, 1))  # (B, M, 256)
-        ctx_tokens = self.context_proj(ctx_pointwise.transpose(2, 1))  # (B, N, 256)
+        # --- 3. Iterative Refinement Loop ---
+        for i, (decoder_layer, reg_branch) in enumerate(zip(self.decoder_layers, self.reg_branches)):
+            
+            # Dynamic Positional Encoding (Based on CURRENT refined coordinates)
+            pos_tgt = self.pos_emb(current_line_coords) # (B, M, 256)
 
-        attended_line = self.cross_attention(line_tokens, ctx_tokens)  # (B, M, 256)
-        attended_line = attended_line.transpose(2, 1)  # (B, 256, M)
+            # Transformer Decoder Layer
+            # tgt: updates across layers (content)
+            # pos_tgt: updates across layers (geometry)
+            tgt = decoder_layer(tgt, memory, query_pos=pos_tgt, pos=pos_mem)
 
-        # 4. Fuse: [GlobalContext, AttendedLineFeat]
-        global_feat_expanded = global_feat.unsqueeze(2).repeat(1, 1, M)  # (B, 2048, M)
-        fusion = torch.cat([global_feat_expanded, attended_line], dim=1)  # (B, 2304, M)
+            # Regress Delta Offset from features
+            delta_offset = reg_branch(tgt) # (B, M, 3)
 
-        fusion = self.fusion_proj(fusion)  # (B, 512, M)
+            # Update Coordinates
+            # Predicted line = current_ref_line + delta
+            # So the cumulative offset from original noisy_line is: (current - noisy) + delta
+             
+            # Update for next layer
+            current_line_coords = current_line_coords + delta_offset
+            
+            # Store cumulative offset for Deep Supervision
+            cum_offset = current_line_coords - noisy_line
+            all_pred_offsets.append(cum_offset)
 
-        # 5. Regress Offsets
-        offsets = self.regressor(fusion)  # (B, 3, M)
-
-        # Transpose back: (B, M, 3)
-        return offsets.transpose(2, 1)
+        # Stack outputs: (L, B, M, 3)
+        return torch.stack(all_pred_offsets) 
 
 if __name__ == '__main__':
     # Test
@@ -182,7 +223,7 @@ if __name__ == '__main__':
     fake_line = torch.randn(2, 32, 3)
     model = LineRefineNet()
     out = model(fake_ctx, fake_line)
-    print("Output shape:", out.shape)  # Expect (2, 32, 3)
+    print("Output shape:", out.shape)  # Expect (6, 2, 32, 3)
 
     # Print model size
     total_params = sum(p.numel() for p in model.parameters())

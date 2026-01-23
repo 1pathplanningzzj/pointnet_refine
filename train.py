@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -7,6 +8,13 @@ from src.model import LineRefineNet
 import torch.nn.functional as F
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoints_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
+    args = parser.parse_args()
+
+    CHECKPOINTS_DIR = args.checkpoints_dir
+    os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
+
     # Settings
     BATCH_SIZE = 32
     EPOCHS = 100
@@ -15,10 +23,10 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 1. Data
-    # Reduced crop_radius to 0.6m for finer local context
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.6)
+    # Reduced crop_radius to 0.3m for finer local context
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.3)
     dataloader = DataLoader(
-        dataset, 
+        dataset,  
         batch_size=BATCH_SIZE, 
         shuffle=True, 
         num_workers=16, # Reduced to 8 for stability
@@ -30,6 +38,7 @@ def main():
     # 2. Model
     model = LineRefineNet().to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LR)
+    criterion = torch.nn.L1Loss() # MAE usually better for geometry than MSE
     
     print(f"Start training on {DEVICE} with {len(dataset)} samples...")
     
@@ -43,11 +52,18 @@ def main():
             
             optimizer.zero_grad()
             
-            # Forward
-            pred_offset = model(context, noisy_line)
+            # Forward: Returns list [layer_1, layer_2, ..., layer_final]
+            # Output shape: (L, B, M, 3)
+            pred_offsets_stack = model(context, noisy_line)
             
-            # Loss: MSE between predicted offset and target offset
-            loss = F.mse_loss(pred_offset, target_offset)
+            # Deep Supervision Loss
+            loss = 0.0
+            num_layers = pred_offsets_stack.shape[0]
+            
+            for l in range(num_layers):
+                 loss += criterion(pred_offsets_stack[l], target_offset)
+            
+            loss = loss / num_layers
             
             loss.backward()
             optimizer.step()
@@ -62,10 +78,11 @@ def main():
         
         # Save checkpoint occasionally
         if (epoch+1) % 10 == 0:
-            torch.save(model.state_dict(), f"checkpoints/refine_model_epoch_{epoch+1}.pth")
+            save_path = os.path.join(CHECKPOINTS_DIR, f"refine_model_epoch_{epoch+1}.pth")
+            torch.save(model.state_dict(), save_path)
 
     print("Training Complete.")
-    torch.save(model.state_dict(), "checkpoints/best_model.pth")
+    torch.save(model.state_dict(), os.path.join(CHECKPOINTS_DIR, "best_model.pth"))
 
 if __name__ == "__main__":
     main()
