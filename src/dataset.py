@@ -29,19 +29,48 @@ def resample_polyline(points, num_points=32):
     return new_points
 
 def load_pcd_data(pcd_path):
-    # Optimized loader using numpy
+    # Optimized loader handling both ASCII and Binary PCD
     try:
-        # Assuming 10 lines of header as per generate_train_data.py
-        # Check first line to be safe or just try skiprows=11
-        # To be robust, we read until DATA ascii
         with open(pcd_path, 'rb') as f:
-            for i, line in enumerate(f):
-                if line.strip().startswith(b'DATA'):
-                    skip = i + 1
+            header = []
+            while True:
+                line = f.readline().strip()
+                header.append(line)
+                if line.startswith(b'DATA'):
                     break
-        
-        data = np.loadtxt(pcd_path, skiprows=skip, dtype=np.float32)
-        return data
+            
+            data_type = header[-1].split()[1] # DATA ascii or DATA binary
+            
+            if data_type == b'ascii':
+                # Re-read using numpy (efficient for ASCII)
+                # We need to skip header lines. header list length contains all lines including DATA
+                data = np.loadtxt(pcd_path, skiprows=len(header), dtype=np.float32)
+                return data
+            else:
+                # BINARY parsing
+                buffer = f.read()
+                # Try common formats
+                # Protocol: x y z i (4 floats) -> 16 bytes
+                # Or x y z (float) + i (u2/u4) -> mixed
+                
+                # Heuristic based on file size
+                num_points_str = [l for l in header if l.startswith(b'POINTS')][0]
+                num_points = int(num_points_str.split()[1])
+                
+                if len(buffer) == num_points * 16: # 4 * float32
+                    dt = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('intensity', 'f4')])
+                    data = np.frombuffer(buffer, dtype=dt)
+                    return np.column_stack((data['x'], data['y'], data['z'], data['intensity']))
+                
+                elif len(buffer) == num_points * 14: # 3 * float32 + 1 * u2
+                    dt = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('intensity', 'u2')])
+                    data = np.frombuffer(buffer, dtype=dt)
+                    return np.column_stack((data['x'], data['y'], data['z'], data['intensity'].astype(np.float32)))
+                    
+                else:
+                    print(f"Unknown binary format for {pcd_path}, bytes={len(buffer)}, points={num_points}")
+                    return np.zeros((0, 4), dtype=np.float32)
+
     except Exception as e:
         print(f"Error loading {pcd_path}: {e}")
         return np.zeros((0, 4), dtype=np.float32)
@@ -84,7 +113,7 @@ def weighted_sampling(context_points, noisy_points, num_samples=1024):
     return context_points[choice]
 
 class LaneRefineDataset(Dataset):
-    def __init__(self, data_root, num_line_points=32, num_context_points=1024, crop_radius=0.6, split='train'):
+    def __init__(self, data_root, num_line_points=32, num_context_points=1024, crop_radius=0.3, split='train'):
         self.data_root = data_root
         self.files = [f for f in os.listdir(data_root) if f.endswith('.json')]
         self.num_line_points = num_line_points
@@ -160,14 +189,14 @@ class LaneRefineDataset(Dataset):
         noisy_points = resample_polyline(noisy_points_raw, self.num_line_points)
         
         # 4. Crop Context Points (Cylindrical / Distance-based)
-        # Instead of simple sphere check around centroid, check distance to the polyline itself
         if len(pcd_points) > 0 and len(noisy_points) > 0:
-            # Build KDTree for the noisy line points
-            tree = KDTree(noisy_points)
+            # Use high-density points for cropping to ensure continuous coverage (Tube)
+            # 32 points over 50m leaves gaps if radius=0.5m. 
+            # 200 points -> 0.25m spacing -> Continuous overlap.
+            noisy_points_dense = resample_polyline(noisy_points_raw, 200)
+            tree = KDTree(noisy_points_dense)
             
             # Query the distance from every PCD point to the nearest line point
-            # pcd_points[:, :3] shape: (N, 3)
-            # tree contains M points (e.g. 32)
             dists, _ = tree.query(pcd_points[:, :3])
             
             # Keep points within crop_radius of the *line*
