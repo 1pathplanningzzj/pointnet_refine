@@ -75,7 +75,7 @@ def load_pcd_data(pcd_path):
         print(f"Error loading {pcd_path}: {e}")
         return np.zeros((0, 4), dtype=np.float32)
 
-def weighted_sampling(context_points, noisy_points, num_samples=1024):
+def weighted_sampling(context_points, noisy_points, num_samples=1024, decay_scale=2.0):
     """
     Weighted sampling based on distance to the lane line.
     Points closer to the line have higher probability of being sampled.
@@ -92,8 +92,8 @@ def weighted_sampling(context_points, noisy_points, num_samples=1024):
     distances, _ = tree.query(context_points[:, :3])
 
     # Weights decay exponentially with distance
-    # Scale 0.3 means weight drops to ~36% at 0.3m. Tighter focus for accurate refinement.
-    weights = np.exp(-distances / 0.3)
+    # Increased scale to 2.0m to allow attending to features further away (typical noise range)
+    weights = np.exp(-distances / decay_scale)
     
     w_sum = weights.sum()
     if w_sum < 1e-6:
@@ -113,12 +113,13 @@ def weighted_sampling(context_points, noisy_points, num_samples=1024):
     return context_points[choice]
 
 class LaneRefineDataset(Dataset):
-    def __init__(self, data_root, num_line_points=32, num_context_points=1024, crop_radius=0.3, split='train'):
+    def __init__(self, data_root, num_line_points=32, num_context_points=2048, crop_radius=4.0, decay_scale=2.0, split='train'):
         self.data_root = data_root
         self.files = [f for f in os.listdir(data_root) if f.endswith('.json')]
         self.num_line_points = num_line_points
         self.num_context_points = num_context_points
         self.crop_radius = crop_radius
+        self.decay_scale = decay_scale
         
         # Cache for PCD data to avoid repeated slow IO
         self.pcd_cache = {}
@@ -206,7 +207,7 @@ class LaneRefineDataset(Dataset):
             context_points = np.zeros((0, 4))
             
         # 5. Weighted Sampling
-        context_points = weighted_sampling(context_points, noisy_points, self.num_context_points)
+        context_points = weighted_sampling(context_points, noisy_points, self.num_context_points, decay_scale=self.decay_scale)
             
         # 6. Normalization
         # Center everything to the noisy line centroid

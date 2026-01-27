@@ -10,6 +10,50 @@ from src.model import LineRefineNet
 import torch.nn.functional as F
 import logging
 import datetime
+import matplotlib
+matplotlib.use('Agg') # Ensure we can plot without a window system
+import matplotlib.pyplot as plt
+import numpy as np
+
+def visualize_training_sample(context, noisy, pred_offset, gt_offset, epoch, save_dir):
+    """
+    Visualizes one training sample and saves the plot.
+    """
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+    
+    # Move to CPU and numpy
+    # context: (B, N, 4) -> (N, 4)
+    ctx = context[0].detach().cpu().numpy()
+    line_noisy = noisy[0].detach().cpu().numpy() # (M, 3)
+    off_pred = pred_offset[0].detach().cpu().numpy() # (M, 3)
+    off_gt = gt_offset[0].detach().cpu().numpy() # (M, 3)
+    
+    # Calculate absolute coordinates
+    line_pred = line_noisy + off_pred
+    line_gt = line_noisy + off_gt
+    
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.set_facecolor('black')
+    
+    # Plot Context (y vs x for BEV)
+    # ctx[:, 0] is x (forward), ctx[:, 1] is y (lateral)
+    # usually we plot x vertical, y horizontal
+    ax.scatter(ctx[:, 1], ctx[:, 0], c=ctx[:, 3], s=1, cmap='gray', alpha=0.5, label='Context')
+    
+    # Plot Lines
+    ax.plot(line_noisy[:, 1], line_noisy[:, 0], color='red', linestyle='--', linewidth=1.5, label='Noisy')
+    ax.plot(line_gt[:, 1], line_gt[:, 0], color='lime', linewidth=2, label='GT')
+    ax.plot(line_pred[:, 1], line_pred[:, 0], color='cyan', linewidth=2, label='Pred')
+    
+    ax.legend(facecolor='black', labelcolor='white')
+    ax.set_title(f"Epoch {epoch} Training Sample Vis")
+    ax.set_aspect('equal')
+    
+    save_path = os.path.join(save_dir, f"vis_epoch_{epoch:03d}.png")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close(fig)
 
 def setup():
     # Initialize the process group
@@ -77,8 +121,9 @@ def main():
     DATA_ROOT = "train_data"
     
     # 1. Data
-    # crop_radius needs to match single GPU training -> 0.3
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.3)
+    # crop_radius: 0.5m covers ~30cm error with margin.
+    # num_context_points: 2048 is dense enough for 0.5m radius.
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.5, num_context_points=2048)
     
     # DistributedSampler handles data splitting across GPUs
     sampler = DistributedSampler(dataset, shuffle=True)
@@ -109,6 +154,8 @@ def main():
         if not os.path.exists(CHECKPOINTS_DIR):
             os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
     
+    best_loss = float('inf')
+
     model.train()
     for epoch in range(EPOCHS):
         # Important: set epoch for sampler to ensure different shuffles each epoch
@@ -143,14 +190,26 @@ def main():
             if global_rank == 0 and batch_idx % 10 == 0:
                  logger.info(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.6f}")
 
+            # Visualize the first batch of every epoch (on main process only)
+            if global_rank == 0 and batch_idx == 0:
+                 # Use the LAST layer prediction for visualization
+                 final_pred_offset = pred_offsets_stack[-1]
+                 visualize_training_sample(context, noisy_line, final_pred_offset, target_offset, epoch+1, os.path.join(CHECKPOINTS_DIR, "vis"))
+        
         avg_loss = total_loss / len(dataloader)
         
         # Only print and save on main process
         if global_rank == 0:
             logger.info(f"Epoch {epoch+1}/{EPOCHS}, Loss: {avg_loss:.6f}")
+            
+            # Save Best Model
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                torch.save(model.module.state_dict(), os.path.join(CHECKPOINTS_DIR, "best_model.pth"))
+                logger.info(f"  New best model saved with loss {best_loss:.6f}")
         
             # Save checkpoint occasionally
-            if (epoch+1) % 10 == 0:
+            if (epoch+1) % 5 == 0:
                 # Use model.module when saving DDP model to get the underlying model weights
                 save_path = os.path.join(CHECKPOINTS_DIR, f"refine_model_epoch_{epoch+1}.pth")
                 torch.save(model.module.state_dict(), save_path)

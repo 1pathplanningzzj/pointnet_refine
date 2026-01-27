@@ -14,7 +14,7 @@ from src.model import LineRefineNet
 
 # Config
 DATA_DIR = "./vma_infer_data"
-MODEL_PATH = "checkpoints/refine_model_epoch_50.pth"
+MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based/refine_model_epoch_60.pth"
 OUTPUT_HTML_DIR = "./vma_inference_vis_whole_scene"
 NUM_VIS_SAMPLES = 50  # Number of SCENES to visualize
 NUM_LINE_POINTS = 32
@@ -68,6 +68,28 @@ def crop_gt_to_pred_range(gt_points, pred_points):
         cropped_gt = cropped_gt[::-1]
         
     return cropped_gt
+
+def compute_chamfer_distance(pred, gt):
+    """
+    Computes Chamfer Distance between two point clouds/lines.
+    CD = mean(min_dist(pred -> gt)) + mean(min_dist(gt -> pred))
+    Returns: CD, Pred2GT_Mean (Lateral Error Estimate)
+    """
+    if len(pred) == 0 or len(gt) == 0:
+        return 999.0, 999.0
+        
+    # Pred -> GT
+    tree_gt = KDTree(gt)
+    dists_p2g, _ = tree_gt.query(pred)
+    mean_p2g = np.mean(dists_p2g)
+    
+    # GT -> Pred
+    tree_pred = KDTree(pred)
+    dists_g2p, _ = tree_pred.query(gt)
+    mean_g2p = np.mean(dists_g2p)
+    
+    cd = mean_p2g + mean_g2p
+    return cd, mean_p2g
 
 def process_single_line(model, pcd_points, noisy_line_raw, device):
     """
@@ -125,6 +147,53 @@ def process_single_line(model, pcd_points, noisy_line_raw, device):
     
     return refined_line, noisy_points
 
+def calibrate_alignment(pred_lines, gt_lines):
+    """
+    Brute-force search for optimal shift (dx, dy) to align Pred to GT.
+    Range: +/- 30m, Step 0.5m
+    """
+    best_offset = (0, 0)
+    best_dist = float('inf')
+    
+    # Coarse search
+    search_range_x = np.arange(-20, 20, 2.0)
+    search_range_y = np.arange(-10, 10, 1.0)
+    
+    # Concatenate all lines for faster compute
+    if len(pred_lines) == 0 or len(gt_lines) == 0:
+        return (0,0), 999.0
+        
+    pred_all = np.vstack(pred_lines)
+    gt_all = np.vstack(gt_lines)
+    tree_gt = KDTree(gt_all)
+    
+    for dx in search_range_x:
+        for dy in search_range_y:
+            shifted = pred_all + np.array([dx, dy, 0])
+            dists, _ = tree_gt.query(shifted)
+            mean_dist = np.mean(dists)
+            
+            if mean_dist < best_dist:
+                best_dist = mean_dist
+                best_offset = (dx, dy)
+                
+    # Fine search
+    best_x, best_y = best_offset
+    search_range_x = np.arange(best_x - 2.0, best_x + 2.0, 0.2)
+    search_range_y = np.arange(best_y - 1.0, best_y + 1.0, 0.2)
+    
+    for dx in search_range_x:
+        for dy in search_range_y:
+            shifted = pred_all + np.array([dx, dy, 0])
+            dists, _ = tree_gt.query(shifted)
+            mean_dist = np.mean(dists)
+            
+            if mean_dist < best_dist:
+                best_dist = mean_dist
+                best_offset = (dx, dy)
+                
+    return best_offset, best_dist
+
 def main():
     # 1. Load Model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -145,7 +214,12 @@ def main():
         return
 
     print(f"Found {len(json_files)} scenes. Processing top {NUM_VIS_SAMPLES}...")
-
+    
+    # After loading data in loop:
+    # Collect all Pred/GT for calibration
+    all_pred_lines = []
+    all_gt_lines = []
+    
     for i, json_file in enumerate(json_files):
         if i >= NUM_VIS_SAMPLES:
             break
@@ -167,6 +241,10 @@ def main():
             
         # Initialize Figure
         fig = go.Figure()
+        
+        # Calibration Containers
+        scene_pred_lines = []
+        scene_gt_lines = []
         
         # --- Analyze Intensity Stats ---
         intensities = full_pcd[:, 3]
@@ -234,6 +312,7 @@ def main():
 
             # --- Visualization: Target GT (Green) ---
             if len(gt_points) > 1:
+                scene_gt_lines.append(gt_points) # For calibration
                 fig.add_trace(go.Scatter3d(
                     x=gt_points[:,0], y=gt_points[:,1], z=gt_points[:,2],
                     mode='lines', # solid
@@ -247,6 +326,8 @@ def main():
                 
                 if len(noisy_arr) < 2:
                     continue
+                
+                scene_pred_lines.append(noisy_arr) # For calibration
                     
                 # Run Inference
                 refined_arr, resampled_noisy = process_single_line(model, full_pcd, noisy_arr, device)
@@ -259,16 +340,30 @@ def main():
                     if len(cropped_gt_for_metric) > 1:
                         gt_32_metric = resample_polyline(cropped_gt_for_metric, NUM_LINE_POINTS)
                         
+                        # 1. Standard ADE (Point-to-Point) - Sensitive to longitudinal shift
                         diff_noisy = np.linalg.norm(resampled_noisy - gt_32_metric, axis=1)
                         ade_noisy = np.mean(diff_noisy)
                         
                         diff_refined = np.linalg.norm(refined_arr - gt_32_metric, axis=1)
                         ade_refined = np.mean(diff_refined)
                         
-                        improvement = ade_noisy - ade_refined
-                        metric_info = f"<br>ADE: {ade_noisy:.2f}m -> {ade_refined:.2f}m (Imp: {improvement:.2f}m)"
-                        print(f"    Line {item_idx}-{n_idx}: ADE {ade_noisy:.3f} -> {ade_refined:.3f}")
+                        # 2. Chamfer Distance (Geometry-to-Geometry) - Better for lateral accuracy
+                        # Use high-res GT for Chamfer to get better geometry distance
+                        cd_noisy, lat_noisy = compute_chamfer_distance(resampled_noisy, cropped_gt_for_metric)
+                        cd_refined, lat_refined = compute_chamfer_distance(refined_arr, cropped_gt_for_metric)
 
+                        # Filter valid matches: If VMA line is too far (> 1.0m) from matched GT, metrics are meaningless
+                        # This avoids polluting stats with "Matched to wrong lane" cases
+                        if lat_noisy > 1.0:
+                            metric_info = (f"<br>(Bad Match) ADE: {ade_noisy:.2f}->{ade_refined:.2f}"
+                                           f"<br>Lat: {lat_noisy:.2f}->{lat_refined:.2f}")
+                            print(f"    Line {item_idx}-{n_idx} [SKIP METRIC]: Initial Lat {lat_noisy:.3f}m > 1.0m (Likely Wrong Match)")
+                        else:
+                            metric_info = (f"<br>ADE: {ade_noisy:.2f}->{ade_refined:.2f}"
+                                           f"<br>Lat: {lat_noisy:.2f}->{lat_refined:.2f}")
+                            
+                            print(f"    Line {item_idx}-{n_idx}: ADE {ade_noisy:.3f}->{ade_refined:.3f} | Lat {lat_noisy:.3f}->{lat_refined:.3f}")
+                            
                 # Plot Noisy (Red Dash)
                 fig.add_trace(go.Scatter3d(
                     x=resampled_noisy[:,0], y=resampled_noisy[:,1], z=resampled_noisy[:,2],
@@ -285,6 +380,11 @@ def main():
                     line=dict(color='magenta', width=2),
                     name=f'Refined {item_idx}'
                 ))
+
+        # Run Calibration for this scene
+        if len(scene_pred_lines) > 0 and len(scene_gt_lines) > 0:
+            best_offset, best_score = calibrate_alignment(scene_pred_lines, scene_gt_lines)
+            print(f"XXX SCENE CALIBRATION XXX: Best Offset (dx, dy) = ({best_offset[0]:.2f}, {best_offset[1]:.2f}) with MeanDist={best_score:.3f}")
 
         # Layout
         fig.update_layout(

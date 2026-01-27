@@ -84,24 +84,15 @@ def transform_to_local(global_pts, pose):
     # R_local_to_global = R_pose
     # R_global_to_local = R_pose^T
     rot_matrix = quat_to_matrix(pose['q'])
-    inv_rot = rot_matrix.T
     
-    # local = global * R.T ? No.
-    # v_local = R_inv * v_global_centered
-    # v_local = R.T * v_global_centered
-    # Matrix mult: (3,3) * (3, 1) -> (3, 1)
-    # Using numpy dot: (N, 3) @ (3, 3) -> (N, 3)
-    # We want: v_local^T = (R.T * v_centered)^T = v_centered^T * R
-    # Wait, R.T is the inverse rotation.
-    # v_local = R^T @ v_centered
-    # Transposing logic: v_local.T = v_centered.T @ R 
-    # Let's verify standard usage.
-    # global = R * local + T
-    # local = R^T * (global - T)
-    # If using row vectors: local_row = (global - T) @ R
+    # Mathematical derivation for Row Vectors (numpy default):
+    # v_local = R^T * v_global
+    # v_local.T = (R^T * v_global)^T = v_global.T * R
+    # So we should multiply by rot_matrix without transposing.
+    # PREVIOUSLY: inv_rot = rot_matrix.T (This was causing the VMA/PCD mismatch)
+    inv_rot = rot_matrix 
     
-
-    local_xyz = np.dot(centered, inv_rot) # v @ R.T
+    local_xyz = np.dot(centered, inv_rot) 
     
     return local_xyz
 
@@ -186,16 +177,84 @@ def save_json_vma_direct(path, vma_items, ref_ts, res_ts):
 def pixel_to_ego(pixel_points, img_shape=(1000, 1000), res=0.05):
     """
     Convert BEV pixel coordinates to Ego vehicle coordinates.
-    Logic A (Standard X-Forward):
-    - v (row) changes -> x (forward) changes
-    - u (col) changes -> y (left/right) changes
+    Based on VMA config:
+    - bev_res = 0.05
+    - crop_size / input_shape = (1000, 1000)
+    - Ego center is typically at the bottom center or center of the image.
+    
+    Standard VMA/MapTR convention:
+    Image (0,0) is Top-Left.
+    X is Forward (Vertical in Image), Y is Left (Horizontal in Image).
+    
+    Range Coverage: 1000px * 0.05m/px = 50.0m
+    
+    Usually:
+    X_Range: [-15.0, 35.0] (Total 50m) or [0, 50]?
+    Y_Range: [-25.0, 25.0] (Total 50m)
+    
+    Let's infer from standard top-down view mappings:
+    Typically, vehicle is at (W/2, H/2) or (W/2, H_bottom).
+    
+    Hypothesis 1: Center-Center (Vehicle at 25m, 0m relative to map center)
+    x = (H/2 - v) * res
+    y = (W/2 - u) * res
+    
+    Hypothesis 2: Bottom-Center (Vehicle X=0 is some offest from bottom)
+    
+    Wait, `transform_method='minmax'` and `code_size=2` suggests normalization to [0,1].
+    But here we receive raw pixels or normalized? 
+    'pred_instances'['data'] usually contains points in image coordinates (u, v).
+    
+    Let's start with standard Center-Ego assumption often used in generated maps:
+    If the map covers 50m x 50m.
+    
+    Looking at your previous VMA config: None explicit.
+    But let's look at `pixel_to_ego` logic used before:
+    x = (H - v) * res  => v=1000 -> x=0; v=0 -> x=50. (Bottom is 0, Top is 50)
+    y = (W/2 - u) * res => u=500 -> y=0; u=0 -> y=25; u=1000 -> y=-25.
+    
+    This matches the visual output where X (Forward) 0-50m.
+    And Y (Left) -25 to 25m.
+    
+    However, if the VMA config implies a different range (e.g., LiDAR range), we need to adjust.
+    The config says `bev_res = 0.05` and `input_shape=(1000,1000)`.
+    So the coverge is indeed 50m x 50m.
+    
+    IF the GT and Points are aligned with this (0 to 50m), then X offset is correct.
+    But if the GT is effectively [-15, 35] in X, then we need to subtract 15.
+    
+    Let's check the GT bounds from the visualization.
+    The GT lines seem to stretch from bottom to top.
+    
+    Let's KEEP the previous logic but ensure it aligns with the 50x50m window:
+    X: [0, 50], Y: [-25, 25].
     """
     H, W = img_shape
     ego_points = []
+    
+    # MapTR / VMA Standard for nuScenes often uses:
+    # Point Cloud Range: [-15.0, -30.0, -5.0, 35.0, 30.0, 3.0] 
+    # But here crop_size=1000*0.05 = 50m.
+    # X Range: [-15.0, 35.0] (Span 50m) matches perfectly.
+    # Y Range: [-25.0, 25.0] (Span 50m) matches perfectly.
+    
+    X_MAX = 35.0
+    Y_MAX = 25.0
+    # Calibration offsets from scene alignment
+    X_OFFSET = 15.0
+    Y_OFFSET = 0.0
+    
     for u, v in pixel_points:
-        # Standard mapping: X is forward (up in image), Y is left
-        x = (H - v) * res
-        y = (W / 2.0 - u) * res
+        # v is row (0 at top, H at bottom)
+        # Top (v=0) -> X_MAX (35.0)
+        # Bottom (v=H) -> X_MIN (-15.0)
+        x = X_MAX - v * res + X_OFFSET
+        
+        # u is col (0 at left, W at right)
+        # Left (u=0) -> Y_MAX (25.0)
+        # Right (u=W) -> Y_MIN (-25.0)
+        y = Y_MAX - u * res + Y_OFFSET
+        
         ego_points.append({'x': float(x), 'y': float(y), 'z': 0.0})
     return ego_points
 

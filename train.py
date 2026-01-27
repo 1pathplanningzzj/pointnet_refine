@@ -23,8 +23,8 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 1. Data
-    # Reduced crop_radius to 0.3m for finer local context
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.3)
+    # Increased crop_radius to 4.0m to capture true lane markings under large noise
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=4.0, num_context_points=2048)
     dataloader = DataLoader(
         dataset,  
         batch_size=BATCH_SIZE, 
@@ -70,14 +70,14 @@ def main():
             
             total_loss += loss.item()
             
-            if batch_idx % 10 == 0:
+            if batch_idx % 5 == 0:
                  print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.6f}")
 
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch+1}/{EPOCHS}, Loss: {avg_loss:.6f}")
         
         # Save checkpoint occasionally
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 5 == 0:
             save_path = os.path.join(CHECKPOINTS_DIR, f"refine_model_epoch_{epoch+1}.pth")
             torch.save(model.state_dict(), save_path)
 

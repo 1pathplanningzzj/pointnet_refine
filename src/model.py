@@ -179,7 +179,7 @@ class LineRefineNet(nn.Module):
         
         # Memory Position Embedding (Constant)
         pos_mem = self.pos_emb(context[:, :, :3]) # (B, N, 256)
-
+        
         # --- 2. Encode Line (Initial Query) ---
         line_feat = self.point_mlp(noisy_line.transpose(2, 1))
         tgt = line_feat.transpose(2, 1) # (B, M, 256)
@@ -202,7 +202,7 @@ class LineRefineNet(nn.Module):
 
             # Regress Delta Offset from features
             delta_offset = reg_branch(tgt) # (B, M, 3)
-
+            
             # Update Coordinates
             # Predicted line = current_ref_line + delta
             # So the cumulative offset from original noisy_line is: (current - noisy) + delta
