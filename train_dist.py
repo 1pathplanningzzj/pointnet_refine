@@ -162,6 +162,9 @@ def main():
         sampler.set_epoch(epoch)
         
         total_loss = 0
+        total_init_err = 0.0
+        total_refine_err = 0.0
+        num_batches = 0
         for batch_idx, batch in enumerate(dataloader):
             context = batch['context'].to(device, non_blocking=True)
             noisy_line = batch['noisy_line'].to(device, non_blocking=True)
@@ -186,9 +189,26 @@ def main():
             optimizer.step()
             
             total_loss += loss.item()
+            num_batches += 1
+
+            # ----- Geometry metrics: initial vs refined error -----
+            with torch.no_grad():
+                line_gt = noisy_line + target_offset                    # (B, M, 3)
+                line_pred = noisy_line + pred_offsets_stack[-1]         # (B, M, 3)
+
+                init_err = (noisy_line - line_gt).norm(dim=-1).mean()   # 平均点到点距离
+                refine_err = (line_pred - line_gt).norm(dim=-1).mean()
+
+                total_init_err += init_err.item()
+                total_refine_err += refine_err.item()
             
             if global_rank == 0 and batch_idx % 10 == 0:
-                 logger.info(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.6f}")
+                 logger.info(
+                     f"Epoch {epoch+1}, Batch {batch_idx}, "
+                     f"Loss: {loss.item():.6f}, "
+                     f"InitErr: {init_err.item():.4f}m, "
+                     f"RefineErr: {refine_err.item():.4f}m"
+                 )
 
             # Visualize the first batch of every epoch (on main process only)
             if global_rank == 0 and batch_idx == 0:
@@ -196,11 +216,18 @@ def main():
                  final_pred_offset = pred_offsets_stack[-1]
                  visualize_training_sample(context, noisy_line, final_pred_offset, target_offset, epoch+1, os.path.join(CHECKPOINTS_DIR, "vis"))
         
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = total_loss / num_batches
+        avg_init_err = total_init_err / num_batches
+        avg_refine_err = total_refine_err / num_batches
         
         # Only print and save on main process
         if global_rank == 0:
-            logger.info(f"Epoch {epoch+1}/{EPOCHS}, Loss: {avg_loss:.6f}")
+            logger.info(
+                f"Epoch {epoch+1}/{EPOCHS}, "
+                f"Loss: {avg_loss:.6f}, "
+                f"InitErr: {avg_init_err:.4f}m, "
+                f"RefineErr: {avg_refine_err:.4f}m"
+            )
             
             # Save Best Model
             if avg_loss < best_loss:

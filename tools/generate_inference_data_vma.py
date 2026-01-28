@@ -235,20 +235,24 @@ def pixel_to_ego(pixel_points, img_shape=(1000, 1000), res=0.05):
     # MapTR / VMA Standard for nuScenes often uses:
     # Point Cloud Range: [-15.0, -30.0, -5.0, 35.0, 30.0, 3.0] 
     # But here crop_size=1000*0.05 = 50m.
-    # X Range: [-15.0, 35.0] (Span 50m) matches perfectly.
-    # Y Range: [-25.0, 25.0] (Span 50m) matches perfectly.
+    # 
+    # IMPORTANT: Training data uses X range [-25, 25] (centered at vehicle)
+    # So we need to match that range for consistency!
+    # X Range: [-25.0, 25.0] (Span 50m, centered at vehicle)
+    # Y Range: [-25.0, 25.0] (Span 50m)
     
-    X_MAX = 35.0
+    # To get X in [-25, 25]:
+    # Top (v=0) -> X = 25.0 (forward)
+    # Bottom (v=H) -> X = -25.0 (backward)
+    # Formula: x = 25.0 - v * res
     Y_MAX = 25.0
-    # Calibration offsets from scene alignment
-    X_OFFSET = 15.0
     Y_OFFSET = 0.0
     
     for u, v in pixel_points:
         # v is row (0 at top, H at bottom)
-        # Top (v=0) -> X_MAX (35.0)
-        # Bottom (v=H) -> X_MIN (-15.0)
-        x = X_MAX - v * res + X_OFFSET
+        # Top (v=0) -> X = 25.0 (forward 25m)
+        # Bottom (v=H) -> X = -25.0 (backward 25m)
+        x = 25.0 - v * res
         
         # u is col (0 at left, W at right)
         # Left (u=0) -> Y_MAX (25.0)
@@ -375,8 +379,9 @@ def main():
         else:
             local_points = local_xyz
 
-        # Crop to strict ROI (Forward 0 to 50m)
-        mask_final = (local_points[:, 0] >= 0) & (local_points[:, 0] <= SEGMENT_LEN)
+        # Crop to strict ROI: Match training data range [-25, 25] (centered at vehicle)
+        # Training data uses: [-SEGMENT_LEN/2, SEGMENT_LEN/2] = [-25, 25]
+        mask_final = (local_points[:, 0] >= -SEGMENT_LEN/2) & (local_points[:, 0] <= SEGMENT_LEN/2)
         final_points = local_points[mask_final]
         
         if len(final_points) == 0:
@@ -390,9 +395,10 @@ def main():
             # Transform global GT to local frame (XY-Swapped)
             gt_local = transform_to_local(item['points'], closest_pose)
             
-            # Simple Bounds check
-            if np.any((gt_local[:, 0] > 0) & (gt_local[:, 0] < SEGMENT_LEN)):
-                 clipped = clip_polyline_by_x(gt_local, 0, SEGMENT_LEN)
+            # Bounds check: Match training data range [-25, 25] (centered at vehicle)
+            # Training data uses: [-SEGMENT_LEN/2, SEGMENT_LEN/2] = [-25, 25]
+            if np.any((gt_local[:, 0] > -SEGMENT_LEN/2) & (gt_local[:, 0] < SEGMENT_LEN/2)):
+                 clipped = clip_polyline_by_x(gt_local, -SEGMENT_LEN/2, SEGMENT_LEN/2)
                  if len(clipped) > 1:
                      # Convert back to list of dicts for JSON
                      pos_list = []

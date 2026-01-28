@@ -26,8 +26,20 @@ class MultiScalePointNetEncoder(nn.Module):
             nn.ReLU()
         )
 
+        # Intensity-aware gating: use intensity channel to softly re-weight fused features.
+        # 输入的第 4 维是 intensity，我们用一个小的 1x1 Conv MLP 将其映射到与 out_dim 一致的通道数，
+        # 再通过 Sigmoid 得到 [0,1] 的权重，对 fused 做逐点乘法。
+        self.intensity_gate = nn.Sequential(
+            nn.Conv1d(1, 64, 1),
+            nn.ReLU(),
+            nn.Conv1d(64, out_dim, 1),
+            nn.Sigmoid()
+        )
+
     def forward(self, x):
-        # x: (B, C, N)
+        # x: (B, C, N), C = 4 -> [x, y, z, intensity]
+        # Separate intensity for gating
+        intensity = x[:, 3:4, :]  # (B, 1, N)
         feat1 = F.relu(self.bn1(self.conv1(x)))      # (B, 64, N)
         feat2 = F.relu(self.bn2(self.conv2(feat1)))  # (B, 128, N)
         feat3 = F.relu(self.bn3(self.conv3(feat2)))  # (B, 256, N)
@@ -37,6 +49,10 @@ class MultiScalePointNetEncoder(nn.Module):
         # Multi-scale fusion
         multi_scale = torch.cat([feat1, feat2, feat3, feat4, feat5], dim=1)
         fused = self.fusion(multi_scale)  # (B, 1024, N)
+
+        # Intensity-aware gating: high-intensity points (lane/curb cores) have larger weights
+        gate = self.intensity_gate(intensity)  # (B, 1024, N)
+        fused = fused * (0.5 + 0.5 * gate)     # 保持尺度在 [0.5, 1.0] 左右，避免过度放大
 
         # Dual pooling: max + avg
         max_pool = torch.max(fused, 2, keepdim=False)[0]  # (B, 1024)

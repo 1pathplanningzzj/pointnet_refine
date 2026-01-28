@@ -77,8 +77,11 @@ def load_pcd_data(pcd_path):
 
 def weighted_sampling(context_points, noisy_points, num_samples=1024, decay_scale=2.0):
     """
-    Weighted sampling based on distance to the lane line.
-    Points closer to the line have higher probability of being sampled.
+    Weighted sampling based on:
+      1) distance to the lane line  (越近权重越大)
+      2) intensity of the points    (越亮/反射越强权重越大)
+
+    这样可以在保持“沿线 tube 覆盖”的同时，让车道线/路沿等高强度结构在采样中被优先选中。
     """
     if len(context_points) <= num_samples:
         if len(context_points) == 0:
@@ -91,9 +94,23 @@ def weighted_sampling(context_points, noisy_points, num_samples=1024, decay_scal
     tree = KDTree(noisy_points)
     distances, _ = tree.query(context_points[:, :3])
 
-    # Weights decay exponentially with distance
-    # Increased scale to 2.0m to allow attending to features further away (typical noise range)
-    weights = np.exp(-distances / decay_scale)
+    # 1) Distance-based weights: closer to line -> larger weight
+    #    Increased scale to 2.0m to allow attending to features further away (typical noise range)
+    dist_weights = np.exp(-distances / decay_scale)
+
+    # 2) Intensity-based weights: higher intensity -> larger weight
+    #    Normalize intensity to [0, 1] for stability, then map to [0.5, 1.5] as a soft boosting factor.
+    intensities = context_points[:, 3]
+    inten_min = np.min(intensities)
+    inten_max = np.max(intensities)
+    if inten_max > inten_min:
+        inten_norm = (intensities - inten_min) / (inten_max - inten_min + 1e-6)
+    else:
+        inten_norm = np.ones_like(intensities) * 0.5
+    inten_weights = 0.5 + inten_norm  # [0.5, 1.5]
+
+    # Combine distance and intensity
+    weights = dist_weights * inten_weights
     
     w_sum = weights.sum()
     if w_sum < 1e-6:

@@ -14,9 +14,9 @@ from src.dataset import resample_polyline, load_pcd_data, weighted_sampling
 from src.model import LineRefineNet
 
 # Config
-DATA_DIR = "./vma_infer_data"
-MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based/refine_model_epoch_10.pth"
-OUTPUT_DIR = "./vma_inference_vis_bev"
+DATA_DIR = "./vma_infer_data"  # Using inference_data (same distribution as training data)
+MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based/refine_model_epoch_35.pth"
+OUTPUT_DIR = "./inference_vis_bev"  # Changed output dir to avoid confusion
 NUM_VIS_SAMPLES = 50
 NUM_LINE_POINTS = 32
 NUM_CONTEXT_POINTS = 2048 # Increased to match new training config
@@ -232,7 +232,11 @@ def main():
                 ax.plot(gt_arr[:, 1], gt_arr[:, 0], color='lime', linewidth=2.0, label='Target GT', alpha=0.8)
                 
             # Plot Candidates & Refine
-            for i_c, cand in enumerate(candidates):
+            # Only process the first candidate for clarity (one GT -> one candidate)
+            # If you want to see all candidates, you can change this to: candidates = item.get('noisy_candidates', [])
+            candidates_to_process = candidates[:1]  # Only first candidate
+            
+            for i_c, cand in enumerate(candidates_to_process):
                 noisy_arr_3d = np.array([[p['x'], p['y'], p['z']] for p in cand])
                 if len(noisy_arr_3d) < 2: continue
                 
@@ -242,8 +246,8 @@ def main():
                 err_noise = calc_metric(gt_3d_res, noisy_resampled)
                 err_refine = calc_metric(gt_3d_res, refined_3d)
                 
-                noise_label = f"Noisy (E={err_noise:.2f}m)" if i_c==0 else None
-                refine_label = f"Refined (E={err_refine:.2f}m)" if i_c==0 else None
+                noise_label = f"Noisy (E={err_noise:.2f}m)"
+                refine_label = f"Refined (E={err_refine:.2f}m)"
 
                 # Noisy
                 ax.plot(noisy_arr_3d[:,1], noisy_arr_3d[:,0], color='red', linewidth=1.5, linestyle='--', label=noise_label)
