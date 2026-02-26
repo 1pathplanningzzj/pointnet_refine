@@ -17,7 +17,7 @@ VMA_JSON = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/results_fuse17
 PCD_PATH = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0_annotation_raw_data/merged.pcd"
 ANNOT_DIR = "/homes/zhangzijian/vma-dev/testbag/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/cropped_data/annots"
 MODEL_DIR = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based"
-EPOCHS_TO_TEST = [40, 45, 50]
+EPOCHS_TO_TEST = [20, 25, 30]
 
 CONTEXT_RADIUS = 4.0
 NUM_CONTEXT_POINTS = 2048
