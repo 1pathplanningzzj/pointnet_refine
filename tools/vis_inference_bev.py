@@ -14,7 +14,8 @@ from src.dataset import resample_polyline, load_pcd_data, weighted_sampling
 from src.model import LineRefineNet
 
 # Config
-DATA_DIR = "./vma_infer_data"  # Using inference_data (same distribution as training data)
+DATA_DIR = "./inference_data"  # Using inference_data (same distribution as training data)
+# 可以改为 "./vma_infer_data" 使用旧数据，或 "./vma_infer_data_v2" 使用新数据
 MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based/refine_model_epoch_35.pth"
 OUTPUT_DIR = "./inference_vis_bev"  # Changed output dir to avoid confusion
 NUM_VIS_SAMPLES = 50

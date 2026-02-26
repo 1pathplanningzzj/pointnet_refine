@@ -4,35 +4,36 @@ import numpy as np
 import glob
 from scipy.spatial.transform import Rotation as R
 import struct
-import open3d as o3d # Not available, use custom saver
 
 # --- 1. Helper Config ---
-BAG_NAME = "TAD_front_lidar_2025-12-01-11-36-53_14_all.bag"
-DATA_ROOT = f"/homes/zhangzijian/pointnet_refine/data/train/{BAG_NAME}"
-PCD_PATH = os.path.join(DATA_ROOT, "annotation_raw_data/merged.pcd")
-POSE_DIR = os.path.join(DATA_ROOT, "annotation_raw_data/pose")
-GT_JSON_PATH = os.path.join(DATA_ROOT, f"{BAG_NAME}.json")
+# Global config changed to batch processing
+DATA_ROOT = "/homes/zhangzijian/pointnet_refine/data/vma_infer_data_test"
 OUTPUT_DIR = "/homes/zhangzijian/pointnet_refine/inference_data"
+
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 SEGMENT_LEN = 50.0  # meters
 STRIDE = 25.0       # meters
 
 # --- 2. Loaders ---
 
 def load_poses(pose_dir):
-    print("Loading poses...")
+    # print("Loading poses...")
     poses = []
+    if not os.path.exists(pose_dir):
+        print(f"Pose dir does not exist: {pose_dir}")
+        return []
+        
     files = glob.glob(os.path.join(pose_dir, "*.json"))
     for f in files:
         with open(f, 'r') as fp:
             data = json.load(fp)
-            # Use 'ts' from json content, or filename? Usually filename is strictly timestamp
-            # But content has 'ts'. Let's use content 'ts' for consistency with filename if possible
             ts = data['ts']
-            # Also store filename base for exact matching if needed, but ts is key
             filename_ts = os.path.splitext(os.path.basename(f))[0]
             
             poses.append({
-                'ts': str(ts), # Keep as string to match image names often
+                'ts': str(ts),
                 'filename_ts': filename_ts,
                 'x': data['x'],
                 'y': data['y'],
@@ -40,10 +41,8 @@ def load_poses(pose_dir):
                 'q': [data['qx'], data['qy'], data['qz'], data['qw']] # scipy scalar definition
             })
     
-    # Sort by x (assuming mostly linear forward motion) or ts
-    # Sorting by x helps in distance-based sampling
+    # Sort by x
     poses.sort(key=lambda p: p['x'])
-    print(f"Loaded {len(poses)} poses.")
     return poses
 
 def load_pcd_fast(pcd_path):
@@ -66,49 +65,64 @@ def load_pcd_fast(pcd_path):
         buffer = f.read()
         data = np.frombuffer(buffer, dtype=dt)
         
-        # Convert to simple Nx4 array for easier manipulation
-        # [x, y, z, intensity]
-        # intensity cast to float for homogenous array
+        # Convert to simple Nx4 array [x, y, z, intensity]
         arr = np.column_stack((data['x'], data['y'], data['z'], data['intensity'].astype(np.float32)))
         return arr
 
 def load_gt_items(json_path):
-    print(f"Loading GT {json_path}...")
+    # print(f"Loading GT {json_path}...")
     with open(json_path, 'r') as f:
         data = json.load(f)
     items = []
-    for item in data.get('items', []):
-        category = item.get('category', 'unknown')
-        raw_pts = []
-        
-        if 'position' in item and item['position']:
-            raw_pts = item['position']
-        elif 'semantic_line' in item and item['semantic_line'] and 'position' in item['semantic_line']:
-            raw_pts = item['semantic_line']['position']
-
-        pts = []
-        for p in raw_pts:
-            pts.append([p['x'], p['y'], p['z']])
-        if pts:
+    
+    # Handle "lane_lines" format
+    if 'lane_lines' in data:
+         for lane in data['lane_lines']:
+            pts = lane.get('pts', [])
+            if not pts or len(pts) < 2:
+                continue
+            
+            xs, ys = pts[0], pts[1]
+            zs = pts[2] if len(pts) > 2 else [0.0] * len(xs)
+            
+            points = np.array([[xs[i], ys[i], zs[i]] for i in range(len(xs))])
+            
             items.append({
-                'category': category,
-                'points': np.array(pts),
-                'attributes': item.get('attributes', {})
+                'category': 'lane_line',
+                'points': points,
+                'attributes': {}
             })
+    # Handle "items" format
+    elif 'items' in data:
+        for item in data.get('items', []):
+            category = item.get('category', 'unknown')
+            raw_pts = []
+            
+            if 'position' in item and item['position']:
+                raw_pts = item['position']
+            elif 'semantic_line' in item and item['semantic_line'] and 'position' in item['semantic_line']:
+                raw_pts = item['semantic_line']['position']
+
+            pts = []
+            for p in raw_pts:
+                pts.append([p['x'], p['y'], p['z']])
+            if pts:
+                items.append({
+                    'category': category,
+                    'points': np.array(pts),
+                    'attributes': item.get('attributes', {})
+                })
+                
     return items
 
 # --- 3. Processing ---
 
 def save_pcd(path, points):
-    # points: Nx4 (x, y, z, intensity)
-    # Write ASCII or Binary PCD. Binary is faster/smaller.
-    
     num_points = len(points)
     with open(path, 'w') as f:
-        # Header
         f.write("VERSION 0.7\n")
         f.write("FIELDS x y z intensity\n")
-        f.write("SIZE 4 4 4 4\n") # Saving all as float32 for simplicity (intensity cast back to int? or keep float)
+        f.write("SIZE 4 4 4 4\n")
         f.write("TYPE F F F F\n")
         f.write("COUNT 1 1 1 1\n")
         f.write(f"WIDTH {num_points}\n")
@@ -117,9 +131,6 @@ def save_pcd(path, points):
         f.write(f"POINTS {num_points}\n")
         f.write("DATA ascii\n")
         
-        # Write data (slow in python loop, but safe for ascii)
-        # For speed in bulk generation, maybe binary is essential?
-        # Let's write ascii for now, if too slow, switch to binary structure pack
         for p in points:
             f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {int(p[3])}\n")
 
@@ -150,10 +161,7 @@ def transform_to_local(global_pts, pose):
     # 1. Translate
     centered = global_pts[:, :3] - np.array([pose['x'], pose['y'], pose['z']])
     
-    # 2. Rotate
-    # Global to Local = Inverse of Body to Global
-    # Pose orientation usually means Body -> Global
-    # So we need inverse rotation
+    # 2. Rotate (Global -> Local = Inverse of Body -> Global)
     rot = R.from_quat(pose['q'])
     inv_rot = rot.inv()
     local_xyz = inv_rot.apply(centered)
@@ -165,12 +173,8 @@ def transform_to_local(global_pts, pose):
 def clip_polyline_by_x(points, x_min, x_max):
     """
     Clip a checklist of points (polyline) to a valid X range.
-    Interpolates new vertices at the boundaries.
-    Assumes Z and Y are linearly interpolated.
-    points: (N, 3) numpy array
     """
     if len(points) < 2:
-        # Check if single point is in range
         if len(points) == 1:
             if x_min <= points[0][0] <= x_max:
                 return points
@@ -182,134 +186,106 @@ def clip_polyline_by_x(points, x_min, x_max):
         p1 = points[i]
         p2 = points[i+1]
         
-        # Segment parameterization P(t) = P1 + t*(P2-P1), t in [0, 1]
         dx = p2[0] - p1[0]
-        
         t_enter = 0.0
         t_exit = 1.0
         
-        # Clip against x_min
-        # p1[0] + t * dx >= x_min
         if abs(dx) < 1e-6:
-            # Vertical line (const x)
-            if p1[0] < x_min: t_enter = 2.0 # Invalid
+            if p1[0] < x_min: t_enter = 2.0
         else:
             t = (x_min - p1[0]) / dx
             if dx > 0:
-                # entering from left
                 t_enter = max(t_enter, t)
             else:
-                # entering from right?? No, dx < 0 means moving left.
-                # condition x >= x_min.
-                # start at large x, go to small x.
-                # must be less than t for intersection
                 t_exit = min(t_exit, t)
                 
-        # Clip against x_max
-        # p1[0] + t * dx <= x_max
         if abs(dx) < 1e-6:
             if p1[0] > x_max: t_enter = 2.0
         else:
             t = (x_max - p1[0]) / dx
             if dx > 0:
-                # moving right. must be <= x_max
                 t_exit = min(t_exit, t)
             else:
-                # moving left. must be <= x_max (always true if starting < max?)
-                # condition x <= x_max.
-                # if start > max, we need to enter.
                 t_enter = max(t_enter, t)
                 
         if t_enter <= t_exit:
-            # Valid segment exists
-            # Calculate points
-            # Caution: floating point errors
             t_enter = max(0.0, t_enter)
             t_exit = min(1.0, t_exit)
             
             p_start = p1 + t_enter * (p2 - p1)
             p_end = p1 + t_exit * (p2 - p1)
             
-            # Add p_start if it is the first point or disconnected from previous
             if len(new_points) == 0 or np.linalg.norm(new_points[-1] - p_start) > 1e-6:
                 new_points.append(p_start)
-            
-            # Add p_end
             new_points.append(p_end)
 
     return np.array(new_points)
 
-def main():
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
+def process_one_bag(bag_name, pcd_path, pose_dir, gt_json_path, output_dir):
+    # Loaders
+    poses = load_poses(pose_dir)
+    if not poses:
+        print(f"No poses found for {bag_name}.")
+        return
+
+    try:
+        all_points = load_pcd_fast(pcd_path)
+    except Exception as e:
+        print(f"Failed to load PCD for {bag_name}: {e}")
+        return
+
+    if len(all_points) == 0:
+        print(f"No points found for {bag_name}.")
+        return
         
-    poses = load_poses(POSE_DIR)
-    all_points = load_pcd_fast(PCD_PATH)
-    gt_items = load_gt_items(GT_JSON_PATH)
+    gt_items = load_gt_items(gt_json_path)
     
-    # Determine the path length
+    # Process
     x_min = poses[0]['x']
     x_max = poses[-1]['x']
     total_len = x_max - x_min
     
-    print(f"Path covers X: {x_min:.1f} to {x_max:.1f} (Length: {total_len:.1f}m)")
+    # print(f"  Path covers X: {x_min:.1f} to {x_max:.1f} (Length: {total_len:.1f}m)")
     
     # Sliding window
     current_x = x_min + SEGMENT_LEN / 2 
-    # Start center at first 25m mark (window 0-50)
-    
     seg_idx = 0
+    save_count = 0
     
     while current_x < x_max:
         # 1. Find the pose closest to current_x
-        # Using simple min distance sort (could be optimized with bisect but poses len is small < 1000)
         closest_pose = min(poses, key=lambda p: abs(p['x'] - current_x))
-        
-        # Check if pose is reasonably close (e.g. within 5m of target center)
-        # If gaps in data, might be far.
         dist_to_center = abs(closest_pose['x'] - current_x)
         if dist_to_center > 10.0:
-            print(f"Warning: No pose close to x={current_x:.1f} (closest {dist_to_center:.1f}m away). Skipping.")
             current_x += STRIDE
             continue
             
         ts_name = closest_pose['filename_ts']
-        print(f"Processing Segment {seg_idx}: center_x={current_x:.1f}, matches pose {ts_name}")
         
-        # 2. Pre-filter global points to avoid transforming everything
-        # Just grab points within +/- 50m bounding box of the pose global position
-        # This is a safe superset of the final 50m ( +/- 25m ) local crop
-        # Note: This assumes X-aligned path roughly. 
-        # For curves, 50m radius search is better.
+        # 2. Pre-filter global points within +/- 60m radius
         dx = all_points[:, 0] - closest_pose['x']
         dy = all_points[:, 1] - closest_pose['y']
         
-        # 2D radius filter squared
         dist_sq = dx**2 + dy**2
-        mask_radius = dist_sq < (60**2) # 60m radius
+        mask_radius = dist_sq < (60**2) 
         
         subset_points = all_points[mask_radius].copy()
         
         if len(subset_points) == 0:
-            print("  Empty point cloud in this region.")
             current_x += STRIDE
             continue
             
-        # 3. Transform to Local Frame of the closest_pose
+        # 3. Transform to Local Frame
         local_points = transform_to_local(subset_points, closest_pose)
         
         # 4. Final Crop: Local X in [-25, 25]
-        # X axis in local frame usually is Forward.
         mask_final = (local_points[:, 0] >= -SEGMENT_LEN/2) & (local_points[:, 0] <= SEGMENT_LEN/2)
         final_points = local_points[mask_final]
         
-        # 5. Process GT
+        # 5. Process GT (Clip lines)
         final_gt_items = []
         for item in gt_items:
-            # Transform line points
             local_line = transform_to_local(item['points'], closest_pose)
-            
-            # Clip polyline to X range [-25, 25]
             clipped_line = clip_polyline_by_x(local_line, -SEGMENT_LEN/2, SEGMENT_LEN/2)
             
             if len(clipped_line) > 1:
@@ -320,16 +296,47 @@ def main():
                 })
         
         # 6. Save
-        pcd_out = os.path.join(OUTPUT_DIR, f"{ts_name}.pcd")
-        json_out = os.path.join(OUTPUT_DIR, f"{ts_name}.json")
+        # Make filename JUST THE TIMESTAMP
+        unique_name = f"{ts_name}"
+        pcd_out = os.path.join(output_dir, f"{unique_name}.pcd")
+        json_out = os.path.join(output_dir, f"{unique_name}.json")
         
         save_pcd(pcd_out, final_points)
         save_json(json_out, final_gt_items, ts_name)
-        
-        print(f"  Saved {len(final_points)} points, {len(final_gt_items)} lines.")
+        save_count += 1
         
         current_x += STRIDE
         seg_idx += 1
+    
+    print(f"  Generated {save_count} segments for {bag_name}")
+
+
+def main():
+    print(f"Scanning for bags in {DATA_ROOT}...")
+    
+    # Find all .bag.json files
+    bag_json_files = glob.glob(os.path.join(DATA_ROOT, "*.bag.json"))
+    bag_base_names = []
+    
+    for f in bag_json_files:
+        # Filename example: "TAD_..._.bag.json" -> basename "TAD_..."
+        basename = os.path.basename(f).replace(".bag.json", "")
+        # Check for raw data dir: "TAD_..._annotation_raw_data"
+        raw_data_dir = os.path.join(DATA_ROOT, f"{basename}_annotation_raw_data")
+        if os.path.exists(raw_data_dir):
+            bag_base_names.append(basename)
+            
+    print(f"Found {len(bag_base_names)} valid bags to process.")
+    
+    total_bags = len(bag_base_names)
+    for i, bag_name in enumerate(bag_base_names):
+        print(f"\n[{i+1}/{total_bags}] Processing Bag: {bag_name}")
+        
+        pcd_path = os.path.join(DATA_ROOT, f"{bag_name}_annotation_raw_data/merged.pcd")
+        pose_dir = os.path.join(DATA_ROOT, f"{bag_name}_annotation_raw_data/pose")
+        gt_json_path = os.path.join(DATA_ROOT, f"{bag_name}.bag.json")
+        
+        process_one_bag(bag_name, pcd_path, pose_dir, gt_json_path, OUTPUT_DIR)
 
 if __name__ == "__main__":
     main()

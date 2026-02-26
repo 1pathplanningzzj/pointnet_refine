@@ -1,0 +1,38 @@
+[
+  {
+    "epoch": 35,
+    "vma_to_gt_avg": 0.045153842725396014,
+    "refined_to_gt_avg": 0.09912745852372343,
+    "vma_to_pcd_avg": 0.6178913656889928,
+    "refined_to_pcd_avg": 0.5539428386390367,
+    "gt_improvement_pct": -119.53271868037683,
+    "pcd_improvement_pct": 10.349477367862063
+  },
+  {
+    "epoch": 40,
+    "vma_to_gt_avg": 0.045153842725396014,
+    "refined_to_gt_avg": 0.38403930360107563,
+    "vma_to_pcd_avg": 0.6156111356758489,
+    "refined_to_pcd_avg": 0.5515917311316966,
+    "gt_improvement_pct": -750.5130027063659,
+    "pcd_improvement_pct": 10.399325293859183
+  },
+  {
+    "epoch": 45,
+    "vma_to_gt_avg": 0.045153842725396014,
+    "refined_to_gt_avg": 0.36002906803209445,
+    "vma_to_pcd_avg": 0.6180019838923766,
+    "refined_to_pcd_avg": 0.5613504366411589,
+    "gt_improvement_pct": -697.3387120596099,
+    "pcd_improvement_pct": 9.166887603565266
+  },
+  {
+    "epoch": 50,
+    "vma_to_gt_avg": 0.045153842725396014,
+    "refined_to_gt_avg": 0.3077202502304024,
+    "vma_to_pcd_avg": 0.6206115246066989,
+    "refined_to_pcd_avg": 0.6195292430767954,
+    "gt_improvement_pct": -581.4929398186754,
+    "pcd_improvement_pct": 0.1743895314527722
+  }
+]

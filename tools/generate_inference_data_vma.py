@@ -17,7 +17,7 @@ RESULTS_JSON_PATH = os.path.join(DATA_ROOT, "results_fuse175_test316.json")
 OUTPUT_DIR = "/homes/zhangzijian/pointnet_refine/vma_infer_data"
 SEGMENT_LEN = 50.0  # meters
 
-# --- 2. Math Helpers (No SciPy) ---
+# --- 2. Math Helpers  ---
 
 def quat_to_matrix(q):
     """

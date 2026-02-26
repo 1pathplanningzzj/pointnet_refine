@@ -1,0 +1,7 @@
+Sample 1
+VMA line resampled (red): 32 points
+Refined line (green): 32 points
+Context points (gray): 2048 points
+VMA center: [162.46835226 -10.99900355   0.        ]
+Refined center: [ 1.62304200e+02 -1.08942136e+01 -1.07350031e-01]
+Average offset magnitude: 0.2224 m
