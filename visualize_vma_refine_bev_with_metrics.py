@@ -19,11 +19,11 @@ sys.path.append(os.getcwd())
 from src.model import LineRefineNet
 
 # ==================== 配置 ====================
-VMA_JSON = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/results_fuse175_test316.json"
-PCD_PATH = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0_annotation_raw_data/merged.pcd"
+VMA_JSON = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/results_fuse175_test316.json"
+PCD_PATH = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/merged.pcd"
 ANNOT_DIR = "/homes/zhangzijian/vma-dev/testbag/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/cropped_data/annots"
-MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based/refine_model_epoch_35.pth"
-OUTPUT_DIR = "/homes/zhangzijian/pointnet_refine/visualizations/vma_refine_bev"
+MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based_0226/best_model.pth"
+OUTPUT_DIR = "/homes/zhangzijian/pointnet_refine/visualizations/vma_refine_bev_new_model"
 
 # Refine参数
 CONTEXT_RADIUS = 4.0

@@ -1,0 +1,11 @@
+{
+  "model_path": "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based_0226/best_model.pth",
+  "crop_radius": 4.0,
+  "vma_to_gt_avg": 0.045153842725396014,
+  "refined_to_gt_avg": 0.05602880720124435,
+  "vma_to_pcd_avg": 0.6185948908407217,
+  "refined_to_pcd_avg": 0.6198591534237065,
+  "gt_improvement": -0.010874964475848334,
+  "gt_improvement_pct": -24.084250241966437,
+  "pcd_improvement_pct": -0.20437649933812008
+}

@@ -26,13 +26,13 @@ def main():
     # Increased crop_radius to 4.0m to capture true lane markings under large noise
     dataset = LaneRefineDataset(DATA_ROOT, crop_radius=4.0, num_context_points=2048)
     dataloader = DataLoader(
-        dataset,  
-        batch_size=BATCH_SIZE, 
-        shuffle=True, 
-        num_workers=16, # Reduced to 8 for stability
-        pin_memory=True, 
-        persistent_workers=True,
-        prefetch_factor=4
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=8,  # Reduced to 8 to avoid deadlock
+        pin_memory=True,
+        persistent_workers=False,  # Disable to avoid worker hanging
+        prefetch_factor=2
     )
     
     # 2. Model

@@ -121,20 +121,19 @@ def main():
     DATA_ROOT = "train_data"
     
     # 1. Data
-    # crop_radius: 0.5m covers ~30cm error with margin.
-    # num_context_points: 2048 is dense enough for 0.5m radius.
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.5, num_context_points=2048)
-    
+    # Increased crop_radius to 4.0m to match new noise levels (2-10cm)
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=4.0, num_context_points=2048)
+
     # DistributedSampler handles data splitting across GPUs
     sampler = DistributedSampler(dataset, shuffle=True)
-    
+
     dataloader = DataLoader(
-        dataset, 
-        batch_size=BATCH_SIZE_PER_GPU, 
-        shuffle=False, # Important: shuffle must be False when using DistributedSampler
-        num_workers=4, # Workers per GPU
-        pin_memory=True, 
-        persistent_workers=True,
+        dataset,
+        batch_size=BATCH_SIZE_PER_GPU,
+        shuffle=False,  # Important: shuffle must be False when using DistributedSampler
+        num_workers=4,  # Workers per GPU
+        pin_memory=True,
+        persistent_workers=False,  # Disable to avoid worker hanging
         prefetch_factor=2,
         sampler=sampler
     )
