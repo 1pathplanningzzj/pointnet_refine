@@ -6,7 +6,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from src.dataset import LaneRefineDataset
-from src.model import LineRefineNet
+from src.model_v2 import LineRefineNet
 import torch.nn.functional as F
 import logging
 import datetime
@@ -115,14 +115,15 @@ def main():
 
     # Settings
     # Batch size here is PER GPU. Total batch size = 32 * number_of_gpus
-    BATCH_SIZE_PER_GPU = 32 
+    BATCH_SIZE_PER_GPU = 32
     EPOCHS = 100
-    LR = 0.001 # Can scale with world_size if needed
+    LR = 0.0001  # Reduced from 0.001 to improve stability
     DATA_ROOT = "train_data"
+    SAVE_EPOCH_INTERVAL = 5  # Save checkpoint every 5 epochs
     
     # 1. Data
-    # Increased crop_radius to 4.0m to match new noise levels (2-10cm)
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=4.0, num_context_points=2048)
+    # Using crop_radius=0.5m for focused local context
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.5, num_context_points=2048)
 
     # DistributedSampler handles data splitting across GPUs
     sampler = DistributedSampler(dataset, shuffle=True)
@@ -146,6 +147,10 @@ def main():
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     optimizer = optim.Adam(model.parameters(), lr=LR)
+
+    # Add learning rate scheduler (cosine annealing)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+
     criterion = torch.nn.L1Loss()
     
     if global_rank == 0:
@@ -183,8 +188,12 @@ def main():
                  loss += criterion(pred_offsets_stack[l], target_offset)
             
             loss = loss / num_layers
-            
+
             loss.backward()
+
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optimizer.step()
             
             total_loss += loss.item()
@@ -225,20 +234,25 @@ def main():
                 f"Epoch {epoch+1}/{EPOCHS}, "
                 f"Loss: {avg_loss:.6f}, "
                 f"InitErr: {avg_init_err:.4f}m, "
-                f"RefineErr: {avg_refine_err:.4f}m"
+                f"RefineErr: {avg_refine_err:.4f}m, "
+                f"LR: {scheduler.get_last_lr()[0]:.6f}"
             )
-            
+
             # Save Best Model
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 torch.save(model.module.state_dict(), os.path.join(CHECKPOINTS_DIR, "best_model.pth"))
                 logger.info(f"  New best model saved with loss {best_loss:.6f}")
-        
-            # Save checkpoint occasionally
-            if (epoch+1) % 5 == 0:
+
+            # Save checkpoint every SAVE_EPOCH_INTERVAL epochs
+            if (epoch+1) % SAVE_EPOCH_INTERVAL == 0:
                 # Use model.module when saving DDP model to get the underlying model weights
                 save_path = os.path.join(CHECKPOINTS_DIR, f"refine_model_epoch_{epoch+1}.pth")
                 torch.save(model.module.state_dict(), save_path)
+                logger.info(f"  Checkpoint saved: epoch_{epoch+1}.pth")
+
+        # Step the learning rate scheduler
+        scheduler.step()
 
     if global_rank == 0:
         logger.info("Training Complete.")

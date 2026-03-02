@@ -4,7 +4,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from src.dataset import LaneRefineDataset
-from src.model import LineRefineNet
+from src.model_v2 import LineRefineNet
 import torch.nn.functional as F
 
 def main():
@@ -23,8 +23,8 @@ def main():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # 1. Data
-    # Increased crop_radius to 4.0m to capture true lane markings under large noise
-    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=4.0, num_context_points=2048)
+    # Using crop_radius=0.5m for focused local context
+    dataset = LaneRefineDataset(DATA_ROOT, crop_radius=0.5, num_context_points=2048)
     dataloader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,

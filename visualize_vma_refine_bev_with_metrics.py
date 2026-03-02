@@ -16,17 +16,17 @@ import matplotlib.cm as cm
 from pathlib import Path
 
 sys.path.append(os.getcwd())
-from src.model import LineRefineNet
+from src.model_v2 import LineRefineNet
 
 # ==================== 配置 ====================
 VMA_JSON = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/results_fuse175_test316.json"
 PCD_PATH = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/merged.pcd"
 ANNOT_DIR = "/homes/zhangzijian/vma-dev/testbag/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/cropped_data/annots"
-MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based_0226/best_model.pth"
+MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/best_model.pth"
 OUTPUT_DIR = "/homes/zhangzijian/pointnet_refine/visualizations/vma_refine_bev_new_model"
 
 # Refine参数
-CONTEXT_RADIUS = 4.0
+CONTEXT_RADIUS = 0.5
 NUM_CONTEXT_POINTS = 2048
 NUM_LINE_POINTS = 32
 DECAY_SCALE = 2.0
@@ -243,7 +243,7 @@ def generate_bev_image(pcd_points, vma_line, refined_line, gt_line, resolution=B
 
     # 创建matplotlib figure - 增大尺寸和DPI
     fig, ax = plt.subplots(figsize=(16, 16))
-    ax.imshow(bev_img, origin='lower', extent=[x_min, x_max, y_min, y_max])
+    ax.imshow(bev_img, origin='lower', extent=[x_min, x_max, y_min, y_max], aspect='equal')
 
     # 绘制线条 - 再次调细线宽
     if gt_line is not None:

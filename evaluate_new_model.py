@@ -16,9 +16,9 @@ from src.model import LineRefineNet
 VMA_JSON = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/results_fuse175_test316.json"
 PCD_PATH = "/homes/zhangzijian/pointnet_refine/data/vma_test_data/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/merged.pcd"
 ANNOT_DIR = "/homes/zhangzijian/vma-dev/testbag/TAD_front_vision_2025-08-20-11-52-36_85_5to25_0.bag/cropped_data/annots"
-MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based_0226/best_model.pth"
+MODEL_PATH = "/homes/zhangzijian/pointnet_refine/experiments/refine_transformer_based/refine_model_epoch_35.pth"
 
-CONTEXT_RADIUS = 4.0  # 新模型的 crop_radius
+CONTEXT_RADIUS = 0.5  # 测试小范围采样
 NUM_CONTEXT_POINTS = 2048
 NUM_LINE_POINTS = 32
 DECAY_SCALE = 2.0
